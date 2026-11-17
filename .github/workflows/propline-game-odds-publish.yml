@@ -35,7 +35,7 @@ jobs:
         run: |
           set -euo pipefail
           output_dir="$RUNNER_TEMP/propline-game-odds-output"
-          mkdir -p "$output_dir"
+          mkdir -p "$output_dir" data
           if [[ -d data/game-odds ]]; then
             cp -a data/game-odds "$output_dir/game-odds"
           fi
