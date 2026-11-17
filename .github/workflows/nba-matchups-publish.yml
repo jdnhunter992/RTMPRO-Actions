@@ -35,7 +35,7 @@ jobs:
       - name: Build today’s NBA matchup recommendations
         env:
           NBA_MATCHUPS_OUTPUT_DIR: ${{ github.workspace }}/data
-        run: python action/scripts/publish_nba_matchups.py
+        run: python action/action/scripts/publish_nba_matchups.py
 
       - name: Publish nba-matchups-data Git snapshot
         env:
