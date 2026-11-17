@@ -1,53 +1,79 @@
 # RTM-PRO Actions and published data
 
-This repository owns the sports-data publishers. They write the app’s published
-JSON snapshots to Cloudflare R2 instead of Git data branches. The RTM-PRO app
-reads the public objects from:
+This repository runs RTM-PRO sports-data publishers. Data is stored directly in
+GitHub, using **one permanent branch for every publisher**. Cloudflare R2 is
+not required.
 
-`https://data.rtmpro.org`
+## Publishing design
 
-Object keys keep the former data-branch namespace, such as
-`propline-data/game-card-odds/v2/latest.json`. Each workflow syncs only the
-prefixes it owns, skips unchanged objects, and removes stale objects within
-those prefixes. Publishers that need cached history restore only their own
-prefixes from R2 before rebuilding.
+- `main`: workflow definitions, scripts, and shared helpers only.
+- Each publisher has an independent permanent output branch.
+- A job restores only its own branch's current data, builds and validates the
+  next generation, then replaces that branch with a new **root commit**.
+- The publish uses a force-with-lease check, so concurrent updates to the same
+  branch cannot silently overwrite each other. Workflow concurrency also
+  serializes each individual publisher. Different publishers run in parallel.
+- File paths within each branch remain stable; previous reachable generations
+  are not kept in commit history.
+- GitHub may retain unreachable objects until its own garbage collection;
+  this approach does **not** guarantee constant physical repository size.
+- Branches are created automatically on the first successful publish, and
+  then reused indefinitely.
+- Empty or missing outputs are rejected. Some feeds enforce extra validations.
 
-## GitHub Actions configuration
+The publishing helper is `scripts/snapshot_git.py`. Workflows need
+`permissions: contents: write` and `GH_TOKEN: ${{ github.token }}`.
 
-Configure these repository secrets and variable:
+## Publisher branches
 
-- Secrets: `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`
-- Repository variables: `R2_ACCOUNT_ID`, `R2_BUCKET` = `sportsedgeai-data`
+| Workflow | Permanent data branch |
+| --- | --- |
+| cfb-player-game-logs-publish | `cfb-player-game-logs-data` |
+| cfb-team-stats-publish | `cfb-team-stats-data` |
+| cfbdepth-injuries | `cfbdepth-injuries-data` |
+| line-movement-graphs | `line-movement-graphs-data` |
+| mlb-prop-center-publish | `mlb-prop-center-data` |
+| nba-injury-report-publish | `nba-injury-report-data` |
+| nba-matchups-publish | `nba-matchups-data` |
+| nba-prop-center-publish | `nba-prop-center-data` |
+| nba-stats-publish | `nba-team-stats-data` |
+| ncaab-prop-center-publish | `ncaab-prop-center-data` |
+| nfl-injury-report-publish | `nfl-injury-report-data` |
+| nfl-matchups-publish | `nfl-matchups-data` |
+| nfl-projection-backtest | `nfl-projection-backtest-data` |
+| nfl-team-stats-publish | `nfl-team-stats-data` |
+| nhl-team-stats-publish | `nhl-team-stats-data` |
+| pikkit-consensus | `Pikkit-Consensus` |
+| propline-game-odds-publish | `propline-game-odds-data` |
+| propline-publish | `propline-player-odds-data` |
+| sharp-odds-ncaaf-publish | `sharpodds-data` |
+| wnba-prop-center-publish | `wnba-prop-center-data` |
 
-The publishers use S3-compatible R2 access with region `auto`. They only need
-read/write access to the bucket objects they publish; repository contents
-permissions are read-only.
+### Reading the JSON
 
-The **Seed Cloudflare R2 from published snapshots** workflow copies the
-currently available Pikkit, PropLine webhook-cache, CFB player-log, CFB team
-stats, and NBA injury snapshots into R2. It runs when first added to `main` and
-can also be run manually. Other prefixes are created the first time their
-publisher runs. The seed workflow attempts to configure public-read CORS; if
-its key lacks bucket-configuration permission, run **Configure R2 public-read
-CORS** once so browser requests can read the public JSON objects. Scheduled
-Base44 triggers keep the snapshots current afterward.
+A file in branch `BRANCH` at path `FILE` is publicly accessible at:
 
-## Other required publisher secrets
+`https://raw.githubusercontent.com/jdnhunter992/RTMPRO-Actions/BRANCH/FILE`
 
-- `PROPLINE_API_KEY` for the PropLine publishers
-- `PIKKIT_AUTH_TOKEN` for the Pikkit consensus collector
-- `SHARP_API_KEY` for NCAAF SharpOdds
-- `PINNACLE_GUEST_API_KEY`, `NOVIG_CLIENT_ID`, `NOVIG_CLIENT_SECRET`, and
-  `REBET_API_KEY` when configured for SharpOdds
-- `BROWSERLESS_TOKEN` for the NBA injury report and stats publishers
-- `STATRANKINGS_COOKIE` for NFL team stats when required by the source
-- `github_workflow_token_2` in Base44 for dispatching workflows in
-  `jdnhunter992/RTMPRO-Actions`
+For example:
 
-## Pikkit community consensus
+`https://raw.githubusercontent.com/jdnhunter992/RTMPRO-Actions/cfb-team-stats-data/cfb-team-stats/index.json`
 
-The **Pikkit Consensus HTTP Publisher** writes complete per-league snapshots
-to `Pikkit-Consensus/data`. The Base44 trigger requests MLB, NCAAFB, NBA, NFL,
-and WNBA for one UTC date per run. This is Pikkit community betting data, not
-sportsbook-wide handle. See
-[`pikkit-consensus/README.md`](pikkit-consensus/README.md) for setup and limits.
+**Update app/Base44 URLs** that still point to `data.rtmpro.org` or
+`propline-data`. PropLine now has independent branches for its game-odds and
+player-odds publishers. A browser app should test GitHub raw response behavior,
+cache freshness, and rate limits before relying on it for heavy traffic.
+
+### Important runtime caveat
+
+Changing the publication destination does not fix upstream API errors, missing
+Python dependencies, or publisher generation bugs. After deploying, run one
+workflow at a time and verify the generated JSON on its branch before switching
+the live frontend to the new URL.
+
+## Existing source credentials
+
+Publisher data-source credentials remain unchanged, including `PROPLINE_API_KEY`,
+`PIKKIT_AUTH_TOKEN`, `SHARP_API_KEY`, `BROWSERLESS_TOKEN`, and any
+publisher-specific source secrets. R2 credentials are no longer consumed by
+the 20 converted publisher workflows.
