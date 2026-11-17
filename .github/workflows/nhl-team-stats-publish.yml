@@ -31,7 +31,7 @@ jobs:
       - name: Restore nhl-team-stats-data Git snapshot
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python scripts/snapshot_git.py restore --branch 'nhl-team-stats-data' --path 'nhl-team-stats'
+        run: python action/scripts/snapshot_git.py restore --branch 'nhl-team-stats-data' --path 'nhl-team-stats'
       - name: Fetch NHL reports and play-by-play; build all filters and league ranks
         env:
           NHL_TEAM_STATS_OUTPUT_DIR: ${{ github.workspace }}/data
@@ -40,4 +40,4 @@ jobs:
       - name: Publish nhl-team-stats-data Git snapshot
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python scripts/snapshot_git.py publish --branch 'nhl-team-stats-data' --path 'nhl-team-stats'
+        run: python action/scripts/snapshot_git.py publish --branch 'nhl-team-stats-data' --path 'nhl-team-stats'
