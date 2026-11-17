@@ -10,7 +10,7 @@ on:
         default: false
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: cfb-team-stats-publisher
@@ -36,31 +36,17 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Restore published data from Cloudflare R2
+      - name: Restore cfb-team-stats-data Git snapshot
         env:
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
-          R2_BUCKET: ${{ vars.R2_BUCKET }}
-        run: |
-          set -euo pipefail
-          python -m pip install --disable-pip-version-check boto3
-          python action/scripts/r2_data.py download --prefix 'cfb-team-stats-data/cfb-team-stats' --dest 'data/cfb-team-stats'
-
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/snapshot_git.py restore --branch 'cfb-team-stats-data' --path 'cfb-team-stats'
       - name: Fetch, calculate, and materialize all CFB timeframes
         env:
           CFB_STATS_OUTPUT_DIR: ${{ github.workspace }}/data
           CFB_REFRESH_PREVIOUS_SEASON: ${{ github.event.inputs.refresh_previous || 'false' }}
         run: deno run --node-modules-dir=auto --allow-net --allow-env --allow-read --allow-write action/scripts/refresh_cfb_team_stats_github.ts
 
-      - name: Publish CFB stats cache to R2
-        working-directory: data
+      - name: Publish cfb-team-stats-data Git snapshot
         env:
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
-          R2_BUCKET: ${{ vars.R2_BUCKET }}
-        run: |
-          set -euo pipefail
-          python -m pip install --disable-pip-version-check boto3
-          python ../action/scripts/r2_data.py sync --root . --map 'cfb-team-stats'='cfb-team-stats-data/cfb-team-stats'
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/snapshot_git.py publish --branch 'cfb-team-stats-data' --path 'cfb-team-stats'
