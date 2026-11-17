@@ -19,7 +19,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 OUTPUT_ROOT = Path(os.environ.get('NBA_MATCHUPS_OUTPUT_DIR', '.')).expanduser()
-R2_PUBLIC_ROOT = 'https://pub-81ef17a720274cb08bafc48d88f3b537.r2.dev'
+R2_PUBLIC_ROOT = 'https://data.rtmpro.org'
 DATA_RAW = f'{R2_PUBLIC_ROOT}/propline-data'
 NBA_SCOREBOARD = 'https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard'
 NBA_SHOTS_RELEASE = 'https://api.github.com/repos/sportsdataverse/sportsdataverse-data/releases/tags/espn_nba_shots'

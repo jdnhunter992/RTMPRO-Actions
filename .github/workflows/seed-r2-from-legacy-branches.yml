@@ -72,7 +72,6 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --disable-pip-version-check boto3
-          python action/scripts/r2_data.py configure-cors || echo 'WARNING: R2 public-read CORS could not be configured with this key; use the Configure R2 public-read CORS workflow.'
           python action/scripts/r2_data.py sync --root . \
             --map snapshots/pikkit/data=Pikkit-Consensus/data \
             --map snapshots/propline-webhook-cache/data=Propline-Webhook-Cache/data \

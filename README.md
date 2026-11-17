@@ -4,7 +4,7 @@ This repository owns the sports-data publishers. They write the app’s publishe
 JSON snapshots to Cloudflare R2 instead of Git data branches. The RTM-PRO app
 reads the public objects from:
 
-`https://pub-81ef17a720274cb08bafc48d88f3b537.r2.dev`
+`https://data.rtmpro.org`
 
 Object keys keep the former data-branch namespace, such as
 `propline-data/game-card-odds/v2/latest.json`. Each workflow syncs only the
@@ -16,8 +16,8 @@ prefixes from R2 before rebuilding.
 
 Configure these repository secrets and variable:
 
-- Secrets: `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_ACCOUNT_ID`
-- Repository variable: `R2_BUCKET` = `sportsedge-data`
+- Secrets: `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`
+- Repository variables: `R2_ACCOUNT_ID`, `R2_BUCKET` = `sportsedgeai-data`
 
 The publishers use S3-compatible R2 access with region `auto`. They only need
 read/write access to the bucket objects they publish; repository contents

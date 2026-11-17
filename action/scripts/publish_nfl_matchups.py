@@ -17,7 +17,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 OUTPUT_ROOT = Path(os.environ.get('NFL_MATCHUPS_OUTPUT_DIR', '.')).expanduser()
-R2_PUBLIC_ROOT = 'https://pub-81ef17a720274cb08bafc48d88f3b537.r2.dev'
+R2_PUBLIC_ROOT = 'https://data.rtmpro.org'
 DATA_RAW = f'{R2_PUBLIC_ROOT}/propline-data'
 NFL_SCOREBOARD = 'https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard'
 NFL_STATS_URL = 'https://github.com/nflverse/nflverse-data/releases/download/stats_player/stats_player_week_{season}.csv'
