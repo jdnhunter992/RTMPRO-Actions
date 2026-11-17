@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: sharp-odds-ncaaf-publisher
@@ -35,17 +35,10 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Restore published data from Cloudflare R2
+      - name: Restore sharpodds-data Git snapshot
         env:
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
-          R2_BUCKET: ${{ vars.R2_BUCKET }}
-        run: |
-          set -euo pipefail
-          python -m pip install --disable-pip-version-check boto3
-          python scripts/r2_data.py download --prefix 'sharpodds-data/sharp-odds/ncaaf' --dest 'data/sharp-odds/ncaaf'
-
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/snapshot_git.py restore --branch 'sharpodds-data' --path 'sharp-odds/ncaaf'
       - name: Refresh and materialize NCAAF snapshots
         env:
           SHARP_API_KEY: ${{ secrets.SHARP_API_KEY }}
@@ -57,14 +50,7 @@ jobs:
           SHARP_ODDS_IMPORT_ONLY: 'true'
         run: deno run --node-modules-dir=auto --allow-net --allow-env --allow-read --allow-write action/scripts/refresh_sharp_odds_ncaaf_github.ts
 
-      - name: Publish NCAAF SharpOdds cache to R2
-        working-directory: data
+      - name: Publish sharpodds-data Git snapshot
         env:
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
-          R2_BUCKET: ${{ vars.R2_BUCKET }}
-        run: |
-          set -euo pipefail
-          python -m pip install --disable-pip-version-check boto3
-          python ../scripts/r2_data.py sync --root . --map 'sharp-odds/ncaaf'='sharpodds-data/sharp-odds/ncaaf'
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/snapshot_git.py publish --branch 'sharpodds-data' --path 'sharp-odds/ncaaf'
