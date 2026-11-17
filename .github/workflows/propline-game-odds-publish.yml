@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: ${{ github.workflow }}
@@ -27,19 +27,10 @@ jobs:
           PROPLINE_API_KEY: ${{ secrets.PROPLINE_API_KEY }}
         run: test -n "$PROPLINE_API_KEY" || { echo 'Add repository secret PROPLINE_API_KEY'; exit 1; }
 
-      - name: Restore current odds history from Cloudflare R2
+      - name: Restore propline-game-odds-data Git snapshot
         env:
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
-          R2_BUCKET: ${{ vars.R2_BUCKET }}
-        run: |
-          set -euo pipefail
-          python -m pip install --disable-pip-version-check boto3
-          mkdir -p data
-          python action/scripts/r2_data.py download --prefix propline-data/game-odds --dest data/game-odds
-          python action/scripts/r2_data.py download --prefix propline-data/game-card-odds/v2 --dest data/game-card-odds/v2
-          python action/scripts/r2_data.py download --prefix 'propline-data/NCAAB Dashboard' --dest 'data/NCAAB Dashboard'
+          GH_TOKEN: ${{ github.token }}
+        run: python action/scripts/snapshot_git.py restore --branch 'propline-game-odds-data' --path 'game-odds' --path 'game-card-odds/v2' --path 'NCAAB Dashboard'
       - name: Prepare isolated output with the current odds history
         run: |
           set -euo pipefail
@@ -79,16 +70,12 @@ jobs:
           print(f"Validated NCAAB dashboard odds list: {len(ncaab['games'])} games")
           PY
 
-      - name: Publish validated odds to Cloudflare R2
+      - name: Publish validated odds to dedicated Git branch
         working-directory: data
         env:
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
-          R2_BUCKET: ${{ vars.R2_BUCKET }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          python -m pip install --disable-pip-version-check boto3
           output_dir="$RUNNER_TEMP/propline-game-odds-output"
           test -s "$output_dir/game-card-odds/v2/latest.json"
           test -s "$output_dir/NCAAB Dashboard/latest.json"
@@ -104,7 +91,4 @@ jobs:
           mv game-card-odds/v2/latest.json.tmp game-card-odds/v2/latest.json
           cp "$output_dir/NCAAB Dashboard/latest.json" 'NCAAB Dashboard/latest.json.tmp'
           mv 'NCAAB Dashboard/latest.json.tmp' 'NCAAB Dashboard/latest.json'
-          python ../action/scripts/r2_data.py sync --root . \
-            --map game-odds=propline-data/game-odds \
-            --map game-card-odds/v2=propline-data/game-card-odds/v2 \
-            --map 'NCAAB Dashboard=propline-data/NCAAB Dashboard'
+          python ../action/scripts/snapshot_git.py publish --branch 'propline-game-odds-data' --path 'game-odds' --path 'game-card-odds/v2' --path 'NCAAB Dashboard'
