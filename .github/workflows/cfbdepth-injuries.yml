@@ -40,6 +40,10 @@ jobs:
             data/cfbdepth/injuries.csv
             data/cfbdepth/registry.json
           if-no-files-found: warn
+      - name: Validate complete CFBDepth coverage
+        run: |
+          python -c 'import json,sys; d=json.load(open("data/cfbdepth/injuries.json")); sys.exit(0 if d.get("complete") is True and int(d.get("refreshed_teams", 0)) > 0 else 1)'
+
       - name: Publish cfbdepth-injuries-data Git snapshot
         env:
           GH_TOKEN: ${{ github.token }}
