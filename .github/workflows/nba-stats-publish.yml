@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: nba-team-stats-publisher
@@ -28,6 +28,10 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Restore nba-team-stats-data Git snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python action/scripts/snapshot_git.py restore --branch 'nba-team-stats-data' --path 'nba-team-stats'
       - name: Prepare output directory
         run: mkdir -p data
       - name: Fetch completed NBA box scores, calculate splits, and publish game JSON
@@ -36,14 +40,7 @@ jobs:
           BROWSERLESS_TOKEN: ${{ secrets.BROWSERLESS_TOKEN }}
         run: python action/action/scripts/publish_nba_stats.py
 
-      - name: Publish NBA stats JSON to R2
-        working-directory: data
+      - name: Publish nba-team-stats-data Git snapshot
         env:
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
-          R2_BUCKET: ${{ vars.R2_BUCKET }}
-        run: |
-          set -euo pipefail
-          python -m pip install --disable-pip-version-check boto3
-          python ../action/scripts/r2_data.py sync --root . --map 'nba-team-stats'='nba-team-stats-data/nba-team-stats'
+          GH_TOKEN: ${{ github.token }}
+        run: python action/scripts/snapshot_git.py publish --branch 'nba-team-stats-data' --path 'nba-team-stats'
