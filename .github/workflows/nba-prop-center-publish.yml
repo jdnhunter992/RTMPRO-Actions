@@ -35,6 +35,7 @@ jobs:
       - name: Fetch NBA box scores and build prop-center JSON
         env:
           NBA_PROP_CENTER_OUTPUT_DIR: ${{ github.workspace }}/data
+          GH_TOKEN: ${{ github.token }}
         run: python action/action/scripts/publish_nba_prop_center.py
 
       - name: Publish nba-prop-center-data Git snapshot
