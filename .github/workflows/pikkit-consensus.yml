@@ -11,7 +11,7 @@ on:
         default: '7'
         required: false
 permissions:
-  contents: read
+  contents: write
 concurrency:
   group: pikkit-consensus-publisher
   cancel-in-progress: false
@@ -38,16 +38,10 @@ jobs:
         env:
           PIKKIT_AUTH_TOKEN: ${{ secrets.PIKKIT_AUTH_TOKEN }}
         run: python3 action/pikkit-consensus/scripts/collect.py --out /tmp/pikkit-consensus-data
-      - name: Restore published data from Cloudflare R2
+      - name: Restore Pikkit-Consensus Git snapshot
         env:
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
-          R2_BUCKET: ${{ vars.R2_BUCKET }}
-        run: |
-          set -euo pipefail
-          python -m pip install --disable-pip-version-check boto3
-          python action/scripts/r2_data.py download --prefix 'Pikkit-Consensus/data' --dest 'data/data'
+          GH_TOKEN: ${{ github.token }}
+        run: python action/scripts/snapshot_git.py restore --branch 'Pikkit-Consensus' --path 'data'
       - name: Stage verified consensus indexes and event details
         working-directory: data
         run: |
@@ -94,22 +88,7 @@ jobs:
                       if old.name not in incoming:
                           old.unlink()
           PY
-      - name: Publish Pikkit consensus data to R2
-        working-directory: data
+      - name: Publish Pikkit-Consensus Git snapshot
         env:
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
-          R2_BUCKET: ${{ vars.R2_BUCKET }}
-        run: |
-          set -euo pipefail
-          python -m pip install --disable-pip-version-check boto3
-          python ../action/scripts/r2_data.py sync --root . --map 'data'='Pikkit-Consensus/data'
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: pikkit-consensus-json
-          path: |
-            /tmp/pikkit-consensus-data/*.json
-            /tmp/pikkit-consensus-data/events/**/*.json
-          if-no-files-found: warn
+          GH_TOKEN: ${{ github.token }}
+        run: python action/scripts/snapshot_git.py publish --branch 'Pikkit-Consensus' --path 'data'
