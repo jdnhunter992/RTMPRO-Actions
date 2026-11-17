@@ -54,8 +54,23 @@ jobs:
           print(f"CFBDepth coverage: refreshed={refreshed}, available={covered}/{total}, failed_requests={len(errors)}, complete={data.get('complete')}", flush=True)
           for item in errors:
               print(f"FAILED {item.get('team_slug')}: {item.get('error')} (cached={item.get('using_last_known_data')})", flush=True)
-          if data.get("complete") is not True or refreshed <= 0:
-              raise SystemExit("Incomplete CFBDepth refresh: refusing to publish; review failed teams above and the uploaded diagnostic artifact.")
+          # Permit a single isolated source outage, but never silently mark
+          # missing teams as healthy or publish a broadly incomplete snapshot.
+          missing = total - covered
+          if total <= 0 or covered > total or refreshed <= 0:
+              raise SystemExit("Invalid CFBDepth coverage totals: refusing to publish.")
+          if missing > 1 or refreshed < total - 1:
+              raise SystemExit(
+                  f"CFBDepth refresh too incomplete to publish: missing={missing}, "
+                  f"refreshed={refreshed}/{total}. Review uploaded diagnostics."
+              )
+          if missing or errors:
+              print(
+                  f"WARNING: Publishing partial CFBDepth snapshot "
+                  f"({covered}/{total} teams available, {refreshed} refreshed). "
+                  "Missing teams must not be interpreted as injury-free.",
+                  flush=True,
+              )
           PY
 
       - name: Publish cfbdepth-injuries-data Git snapshot
