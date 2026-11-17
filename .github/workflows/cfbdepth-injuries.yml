@@ -42,7 +42,21 @@ jobs:
           if-no-files-found: warn
       - name: Validate complete CFBDepth coverage
         run: |
-          python -c 'import json,sys; d=json.load(open("data/cfbdepth/injuries.json")); sys.exit(0 if d.get("complete") is True and int(d.get("refreshed_teams", 0)) > 0 else 1)'
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          data = json.loads(Path("data/cfbdepth/injuries.json").read_text(encoding="utf-8"))
+          refreshed = int(data.get("refreshed_teams") or 0)
+          total = int(data.get("registry_team_count") or 0)
+          covered = len(data.get("teams") or [])
+          errors = data.get("errors") or []
+          print(f"CFBDepth coverage: refreshed={refreshed}, available={covered}/{total}, failed_requests={len(errors)}, complete={data.get('complete')}", flush=True)
+          for item in errors:
+              print(f"FAILED {item.get('team_slug')}: {item.get('error')} (cached={item.get('using_last_known_data')})", flush=True)
+          if data.get("complete") is not True or refreshed <= 0:
+              raise SystemExit("Incomplete CFBDepth refresh: refusing to publish; review failed teams above and the uploaded diagnostic artifact.")
+          PY
 
       - name: Publish cfbdepth-injuries-data Git snapshot
         env:
