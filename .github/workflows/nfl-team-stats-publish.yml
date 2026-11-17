@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: nfl-team-stats-publisher
@@ -26,37 +26,34 @@ jobs:
         with:
           deno-version: v2.x
 
-      - name: Prepare the NFL stats data branch
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          DATA_BRANCH: nfl-team-stats-data
-        run: |
-          mkdir -p data
-          cd data
-          git init -b "$DATA_BRANCH"
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          if git ls-remote --exit-code --heads origin "$DATA_BRANCH" >/dev/null 2>&1; then
-            git fetch --depth=1 origin "$DATA_BRANCH"
-            git reset --hard FETCH_HEAD
-          fi
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
 
+      - name: Restore published data from Cloudflare R2
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check boto3
+          python scripts/r2_data.py download --prefix 'nfl-team-stats-data/nfl-team-stats' --dest 'data/nfl-team-stats'
       - name: Refresh all NFL teams and timeframes
         env:
           NFL_TEAM_STATS_OUTPUT_DIR: ${{ github.workspace }}/data
           STATRANKINGS_COOKIE: ${{ secrets.STATRANKINGS_COOKIE }}
         run: deno run --allow-net --allow-env --allow-read --allow-write action/scripts/refresh_nfl_team_stats_github.ts
 
-      - name: Publish JSON frames
+      - name: Publish NFL stats cache to R2
         working-directory: data
         env:
-          DATA_BRANCH: nfl-team-stats-data
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
         run: |
-          git add nfl-team-stats
-          if git diff --cached --quiet; then
-            echo 'NFL team-stats cache is unchanged.'
-            exit 0
-          fi
-          git commit -qm 'Refresh NFL team-stats cache'
-          git push --quiet origin "HEAD:${DATA_BRANCH}"
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check boto3
+          python ../scripts/r2_data.py sync --root . --map 'nfl-team-stats'='nfl-team-stats-data/nfl-team-stats'

@@ -11,7 +11,7 @@ on:
         default: '7'
         required: false
 permissions:
-  contents: write
+  contents: read
 concurrency:
   group: pikkit-consensus-publisher
   cancel-in-progress: false
@@ -24,29 +24,38 @@ jobs:
       DAYS_AHEAD: ${{ inputs.days || '7' }}
       EVENT_DELAY_MIN_SECONDS: '5'
       EVENT_DELAY_MAX_SECONDS: '10'
-      PUBLISH_BRANCH: 'Pikkit-Consensus'
     steps:
-      - uses: actions/checkout@v6
+      - name: Check out the Actions repository
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+          path: action
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - name: Collect consensus
         env:
           PIKKIT_AUTH_TOKEN: ${{ secrets.PIKKIT_AUTH_TOKEN }}
-        run: python3 scripts/collect.py --out /tmp/pikkit-consensus-data
-      - name: Publish JSON feeds
+        run: python3 action/pikkit-consensus/scripts/collect.py --out /tmp/pikkit-consensus-data
+      - name: Restore published data from Cloudflare R2
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
         run: |
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          if git fetch origin "refs/heads/$PUBLISH_BRANCH:refs/remotes/origin/$PUBLISH_BRANCH"; then
-            git checkout -B "$PUBLISH_BRANCH" "origin/$PUBLISH_BRANCH"
-          else
-            git checkout --orphan "$PUBLISH_BRANCH"
-            git rm -rf . >/dev/null 2>&1 || true
-          fi
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check boto3
+          python action/scripts/r2_data.py download --prefix 'Pikkit-Consensus/data' --dest 'data/data'
+      - name: Stage verified consensus indexes and event details
+        working-directory: data
+        run: |
+          set -euo pipefail
           python3 - <<'PY'
           import json, re, shutil
           from pathlib import Path
+
           source = Path('/tmp/pikkit-consensus-data')
           destination = Path('data')
           indexes = sorted(source.glob('*.json'))
@@ -60,36 +69,42 @@ jobs:
               slug = league.lower()
               if index.name != f'{slug}.json' or doc.get('complete') is not True or not isinstance(doc.get('events'), list):
                   raise SystemExit(f'Invalid sport index: {index}')
-              incoming = []
-              expected_names = set()
+              destination.mkdir(parents=True, exist_ok=True)
+              shutil.copy2(index, destination / index.name)
+              incoming = set()
               for event in doc['events']:
                   event_id = event.get('event_id')
                   if not isinstance(event_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]+', event_id):
                       raise SystemExit(f'Invalid event ID in {index}')
                   filename = f'{event_id}.json'
                   rel_path = f'events/{slug}/{filename}'
-                  if event.get('detail_path') != rel_path or filename in expected_names:
+                  if event.get('detail_path') != rel_path or filename in incoming:
                       raise SystemExit(f'Invalid or duplicate detail_path for {event_id}')
                   detail_source = source / rel_path
                   detail = json.loads(detail_source.read_text())
                   if detail.get('complete') is not True or detail.get('event_id') != event_id:
                       raise SystemExit(f'Invalid event detail file: {detail_source}')
-                  incoming.append((detail_source, filename))
-                  expected_names.add(filename)
-              target_events = destination / 'events' / slug
-              target_events.mkdir(parents=True, exist_ok=True)
-              for existing in target_events.glob('*.json'):
-                  if existing.name not in expected_names:
-                      existing.unlink()
-              for detail_source, filename in incoming:
+                  incoming.add(filename)
+                  target_events = destination / 'events' / slug
+                  target_events.mkdir(parents=True, exist_ok=True)
                   shutil.copy2(detail_source, target_events / filename)
-              shutil.copy2(index, destination / index.name)
+              target_events = destination / 'events' / slug
+              if target_events.exists():
+                  for old in target_events.glob('*.json'):
+                      if old.name not in incoming:
+                          old.unlink()
           PY
-          git add -A data/
-          if ! git diff --staged --quiet; then
-            git commit -m 'Refresh Pikkit community consensus'
-            git push origin "HEAD:$PUBLISH_BRANCH"
-          fi
+      - name: Publish Pikkit consensus data to R2
+        working-directory: data
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check boto3
+          python ../action/scripts/r2_data.py sync --root . --map 'data'='Pikkit-Consensus/data'
       - uses: actions/upload-artifact@v4
         if: always()
         with:

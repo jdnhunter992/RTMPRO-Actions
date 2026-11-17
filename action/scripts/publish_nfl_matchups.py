@@ -17,11 +17,11 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 OUTPUT_ROOT = Path(os.environ.get('NFL_MATCHUPS_OUTPUT_DIR', '.')).expanduser()
-REPOSITORY = os.environ.get('NFL_MATCHUPS_REPOSITORY', 'jdnhunter992/RTMPRO-Actions')
-DATA_RAW = f'https://raw.githubusercontent.com/{REPOSITORY}/propline-data'
+R2_PUBLIC_ROOT = 'https://pub-81ef17a720274cb08bafc48d88f3b537.r2.dev'
+DATA_RAW = f'{R2_PUBLIC_ROOT}/propline-data'
 NFL_SCOREBOARD = 'https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard'
 NFL_STATS_URL = 'https://github.com/nflverse/nflverse-data/releases/download/stats_player/stats_player_week_{season}.csv'
-NFL_INJURY_URL = f'https://raw.githubusercontent.com/{REPOSITORY}/nfl-injury-report-data/nfl-injuries/latest.json'
+NFL_INJURY_URL = f'{R2_PUBLIC_ROOT}/nfl-injury-report-data/nfl-injuries/latest.json'
 HEADERS = {'User-Agent': 'SportsEdgeAI-NFL-Matchups-Publisher/1.0', 'Accept': 'application/json,text/csv,application/octet-stream,*/*'}
 NFL_TEAMS = {'ARI','ATL','BAL','BUF','CAR','CHI','CIN','CLE','DAL','DEN','DET','GB','HOU','IND','JAX','KC','LAC','LAR','LV','MIA','MIN','NE','NO','NYG','NYJ','PHI','PIT','SEA','SF','TB','TEN','WSH'}
 TEAM_ALIASES = {

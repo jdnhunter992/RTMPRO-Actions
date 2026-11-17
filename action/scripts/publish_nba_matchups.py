@@ -19,12 +19,12 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 OUTPUT_ROOT = Path(os.environ.get('NBA_MATCHUPS_OUTPUT_DIR', '.')).expanduser()
-REPOSITORY = os.environ.get('NBA_MATCHUPS_REPOSITORY', 'jdnhunter992/RTMPRO-Actions')
-DATA_RAW = f'https://raw.githubusercontent.com/{REPOSITORY}/propline-data'
+R2_PUBLIC_ROOT = 'https://pub-81ef17a720274cb08bafc48d88f3b537.r2.dev'
+DATA_RAW = f'{R2_PUBLIC_ROOT}/propline-data'
 NBA_SCOREBOARD = 'https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard'
 NBA_SHOTS_RELEASE = 'https://api.github.com/repos/sportsdataverse/sportsdataverse-data/releases/tags/espn_nba_shots'
 NBA_SCHEDULE_ROOT = 'https://github.com/sportsdataverse/sportsdataverse-data/releases/download/espn_nba_schedules'
-NBA_INJURY_URL = f'https://raw.githubusercontent.com/{REPOSITORY}/nba-injury-report-data/nba-injuries/v1/latest.json'
+NBA_INJURY_URL = f'{R2_PUBLIC_ROOT}/nba-injury-report-data/nba-injuries/v1/latest.json'
 HEADERS = {'User-Agent': 'SportsEdgeAI-NBA-Matchups-Publisher/1.0', 'Accept': 'application/json,text/csv,application/octet-stream,*/*'}
 ZONE_NAMES = {
     'restricted_area': 'At the rim', 'paint_non_restricted': 'Paint', 'mid_range': 'Mid-range',

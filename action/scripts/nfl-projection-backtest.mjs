@@ -1,9 +1,9 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
-const sourceRoot = process.env.SPORTS_EDGE_SOURCE_DIR || process.cwd();
-const { projectNFLPlayerPerformance } = await import(pathToFileURL(resolve(sourceRoot, 'src/lib/nflProjectionModel.js')).href);
-const { parquetReadObjects } = await import(pathToFileURL(resolve(sourceRoot, 'node_modules/hyparquet/src/node.js')).href);
+import { pathToFileURL, fileURLToPath } from 'node:url';
+const scriptDir = dirname(fileURLToPath(import.meta.url));
+const { projectNFLPlayerPerformance } = await import(pathToFileURL(resolve(scriptDir, '../models/nflProjectionModel.js')).href);
+const { parquetReadObjects } = await import(pathToFileURL(resolve(scriptDir, '../node_modules/hyparquet/src/node.js')).href);
 
 const ODDS_URL = 'https://raw.githubusercontent.com/theedgepredictor/odds-data-pump/main/data/processed/football/nfl/player_props';
 const STATS_URL = 'https://github.com/nflverse/nflverse-data/releases/download/stats_player/stats_player_week_';

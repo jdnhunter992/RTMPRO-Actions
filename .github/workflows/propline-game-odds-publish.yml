@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}
@@ -27,77 +27,19 @@ jobs:
           PROPLINE_API_KEY: ${{ secrets.PROPLINE_API_KEY }}
         run: test -n "$PROPLINE_API_KEY" || { echo 'Add repository secret PROPLINE_API_KEY'; exit 1; }
 
-      - name: Shallow sparse checkout of the published data branch
+      - name: Restore current odds history from Cloudflare R2
         env:
-          DATA_REPOSITORY: ${{ github.repository }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
         run: |
           set -euo pipefail
-          git clone --quiet --sparse --filter=tree:0 --depth=1 --no-tags \
-            --single-branch --branch propline-data \
-            "https://github.com/${DATA_REPOSITORY}.git" data
-          git -C data sparse-checkout set --no-cone \
-            /game-odds/nfl/index.json \
-            /game-odds/cfb/index.json \
-            /game-odds/nba/index.json \
-            /game-odds/wnba/index.json \
-            /game-odds/nhl/index.json \
-            /game-odds/mlb/index.json \
-            /game-odds/ncaab/index.json \
-            /game-card-odds/v2/latest.json \
-            /game-card-odds/v2/previous.json \
-            '/NCAAB Dashboard/latest.json'
-
-      - name: Fetch only event caches referenced by those indexes
-        working-directory: data
-        run: |
-          set -euo pipefail
-          python3 - <<'PY' > "$RUNNER_TEMP/propline-cached-event-paths"
-          import json
-          from pathlib import Path
-
-          sports = ('nfl', 'cfb', 'nba', 'wnba', 'nhl', 'mlb', 'ncaab')
-          paths = set()
-          for sport in sports:
-              index_path = Path('game-odds') / sport / 'index.json'
-              try:
-                  payload = json.loads(index_path.read_text(encoding='utf-8'))
-              except (OSError, json.JSONDecodeError):
-                  continue
-              for event in payload.get('events', []):
-                  if not isinstance(event, dict):
-                      continue
-                  value = str(event.get('path') or '')
-                  prefix = f'game-odds/{sport}/events/'
-                  if value.startswith(prefix) and value.endswith('.json') and '..' not in Path(value).parts:
-                      paths.add(value)
-          for value in sorted(paths):
-              print(value)
-          PY
-          mapfile -t cached_paths < "$RUNNER_TEMP/propline-cached-event-paths"
-          if ((${#cached_paths[@]})); then
-            # `sparse-checkout add` does not support --no-cone. Re-set the
-            # non-cone pattern list and retain the index/fallback files needed
-            # by later steps while adding the referenced event caches.
-            git sparse-checkout set --no-cone \
-              /game-odds/nfl/index.json \
-              /game-odds/cfb/index.json \
-              /game-odds/nba/index.json \
-              /game-odds/wnba/index.json \
-              /game-odds/nhl/index.json \
-              /game-odds/mlb/index.json \
-              /game-odds/ncaab/index.json \
-              /game-card-odds/v2/latest.json \
-              /game-card-odds/v2/previous.json \
-              '/NCAAB Dashboard/latest.json' \
-              "${cached_paths[@]}"
-          fi
-
-      - name: Configure data commit identity
-        working-directory: data
-        run: |
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-
+          python -m pip install --disable-pip-version-check boto3
+          mkdir -p data
+          python action/scripts/r2_data.py download --prefix propline-data/game-odds --dest data/game-odds
+          python action/scripts/r2_data.py download --prefix propline-data/game-card-odds/v2 --dest data/game-card-odds/v2
+          python action/scripts/r2_data.py download --prefix 'propline-data/NCAAB Dashboard' --dest 'data/NCAAB Dashboard'
       - name: Prepare isolated output with the current odds history
         run: |
           set -euo pipefail
@@ -137,49 +79,32 @@ jobs:
           print(f"Validated NCAAB dashboard odds list: {len(ncaab['games'])} games")
           PY
 
-      - name: Publish validated odds without removing the current file
+      - name: Publish validated odds to Cloudflare R2
         working-directory: data
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
         run: |
           set -euo pipefail
+          python -m pip install --disable-pip-version-check boto3
           output_dir="$RUNNER_TEMP/propline-game-odds-output"
           test -s "$output_dir/game-card-odds/v2/latest.json"
           test -s "$output_dir/NCAAB Dashboard/latest.json"
           test -d "$output_dir/game-odds"
-
-          # Keep the last published payload as a fallback for clients while
-          # GitHub's raw-content edge propagates the newly published large file.
           if [[ -s game-card-odds/v2/latest.json ]]; then
             cp game-card-odds/v2/latest.json game-card-odds/v2/previous.json.tmp
             mv game-card-odds/v2/previous.json.tmp game-card-odds/v2/previous.json
           fi
-
-          python3 - "$output_dir" <<'PY' > "$RUNNER_TEMP/propline-publish-paths"
-          import sys
-          from pathlib import Path
-
-          output = Path(sys.argv[1])
-          paths = {str(path.relative_to(output)) for path in (output / 'game-odds').rglob('*') if path.is_file()}
-          paths.update({'game-card-odds/v2/latest.json', 'NCAAB Dashboard/latest.json'})
-          if Path('game-card-odds/v2/previous.json').is_file():
-              paths.add('game-card-odds/v2/previous.json')
-          for value in sorted(paths):
-              print(value)
-          PY
-          mapfile -t publish_paths < "$RUNNER_TEMP/propline-publish-paths"
-          git sparse-checkout set --no-cone "${publish_paths[@]}"
-
-          mkdir -p game-odds game-card-odds/v2
+          rm -rf game-odds
+          mkdir -p game-odds game-card-odds/v2 'NCAAB Dashboard'
           cp -a "$output_dir/game-odds/." game-odds/
           cp "$output_dir/game-card-odds/v2/latest.json" game-card-odds/v2/latest.json.tmp
           mv game-card-odds/v2/latest.json.tmp game-card-odds/v2/latest.json
-
-          mkdir -p 'NCAAB Dashboard'
           cp "$output_dir/NCAAB Dashboard/latest.json" 'NCAAB Dashboard/latest.json.tmp'
           mv 'NCAAB Dashboard/latest.json.tmp' 'NCAAB Dashboard/latest.json'
-
-          git add -- "${publish_paths[@]}"
-          if git diff --cached --quiet; then exit 0; fi
-          git commit -qm 'Publish PropLine game odds and all-book main-line feed'
-          bash ../action/scripts/push_data_branch.sh propline-data
+          python ../action/scripts/r2_data.py sync --root . \
+            --map game-odds=propline-data/game-odds \
+            --map game-card-odds/v2=propline-data/game-card-odds/v2 \
+            --map 'NCAAB Dashboard=propline-data/NCAAB Dashboard'

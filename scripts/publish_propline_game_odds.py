@@ -661,6 +661,20 @@ def main():
             'coverage': 'available' if games_with_prices else 'no_book_lines_returned',
         }
         print(f'{sport}: {summary[sport]}', flush=True)
+
+    # Keep only event payloads referenced by the new indexes, plus the recent
+    # completed-event fallback entries retained above. Old event JSON otherwise
+    # accumulates forever even though the frontend can no longer reach it.
+    for sport in SPORTS:
+        event_dir = root / 'game-odds' / sport / 'events'
+        if not event_dir.exists():
+            continue
+        index = read_json(root / 'game-odds' / sport / 'index.json') or {}
+        keep = {Path(str(row.get('path') or '')).name for row in index.get('events', []) if isinstance(row, dict)}
+        for old_file in event_dir.glob('*.json'):
+            if old_file.name not in keep:
+                old_file.unlink()
+
     write_json(root / 'game-odds' / 'manifest.json', {'updated_at': stamp, 'sports': summary, 'markets': ['h2h','spreads','totals']})
     card_games.sort(key=lambda game: (game.get('gameTime') or '', game.get('sport') or '', game.get('awayTeam') or ''))
     write_json(root / 'game-card-odds' / 'v2' / 'latest.json', {

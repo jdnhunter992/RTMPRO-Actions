@@ -1,37 +1,53 @@
-# SportsEdgeAI Actions and published data
+# RTM-PRO Actions and published data
 
-This repository owns the SportsEdgeAI GitHub Actions workflows, their runner
-scripts, and the JSON cache branches they publish. Base44 dispatches workflows
-from this repository and its backend functions read the published JSON here.
+This repository owns the sports-data publishers. They write the app’s published
+JSON snapshots to Cloudflare R2 instead of Git data branches. The RTM-PRO app
+reads the public objects from:
 
-## One-time data migration
+`https://pub-81ef17a720274cb08bafc48d88f3b537.r2.dev`
 
-Before deploying Base44 readers that point here, run **Migrate published JSON to
-Actions repository** once. It copies the existing `cfb-team-stats-data`,
-`sharpodds-data`, and `propline-data` branches from `sports-edge-ai2` as a
-snapshot of each branch's current files (without copying its old Git history),
-and seeds `nfl-projection-backtest-data` from the current app JSON. Player-list
-JSON is published by the PropLine workflow on `propline-data`. The migration
-does not delete source branches.
+Object keys keep the former data-branch namespace, such as
+`propline-data/game-card-odds/v2/latest.json`. Each workflow syncs only the
+prefixes it owns, skips unchanged objects, and removes stale objects within
+those prefixes. Publishers that need cached history restore only their own
+prefixes from R2 before rebuilding.
 
-## Repository secrets
+## GitHub Actions configuration
 
-- `PRIVATE_REPO_TOKEN` with read access to `jdnhunter992/sports-edge-ai2` (used for the one-time migration and the NFL model-source checkout)
-- The CFB team-stats publisher reads public SportsDataverse cfbfastR/ESPN release data; it does not require a CFBD API key
+Configure these repository secrets and variable:
+
+- Secrets: `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_ACCOUNT_ID`
+- Repository variable: `R2_BUCKET` = `sportsedge-data`
+
+The publishers use S3-compatible R2 access with region `auto`. They only need
+read/write access to the bucket objects they publish; repository contents
+permissions are read-only.
+
+The **Seed Cloudflare R2 from published snapshots** workflow copies the
+currently available Pikkit, PropLine webhook-cache, CFB player-log, CFB team
+stats, and NBA injury snapshots into R2. It runs when first added to `main` and
+can also be run manually. Other prefixes are created the first time their
+publisher runs. The seed workflow attempts to configure public-read CORS; if
+its key lacks bucket-configuration permission, run **Configure R2 public-read
+CORS** once so browser requests can read the public JSON objects. Scheduled
+Base44 triggers keep the snapshots current afterward.
+
+## Other required publisher secrets
+
+- `PROPLINE_API_KEY` for the PropLine publishers
+- `PIKKIT_AUTH_TOKEN` for the Pikkit consensus collector
 - `SHARP_API_KEY` for NCAAF SharpOdds
-- `PROPLINE_API_KEY` for both PropLine publishers
-- `PIKKIT_AUTH_TOKEN` for the authenticated Pikkit HTTP consensus collector
-- `PINNACLE_GUEST_API_KEY`, `NOVIG_CLIENT_ID`, `NOVIG_CLIENT_SECRET`, and `REBET_API_KEY` when configured for SharpOdds
-
-Set Actions' workflow permission to read and write repository contents. The
-Base44 Pikkit workflow dispatches this action hourly; the action itself has no
-GitHub cron schedule.
+- `PINNACLE_GUEST_API_KEY`, `NOVIG_CLIENT_ID`, `NOVIG_CLIENT_SECRET`, and
+  `REBET_API_KEY` when configured for SharpOdds
+- `BROWSERLESS_TOKEN` for the NBA injury report and stats publishers
+- `STATRANKINGS_COOKIE` for NFL team stats when required by the source
+- `github_workflow_token_2` in Base44 for dispatching workflows in
+  `jdnhunter992/RTMPRO-Actions`
 
 ## Pikkit community consensus
 
-The **Pikkit Consensus HTTP Publisher** workflow reads authenticated community
-consensus endpoints and writes complete per-league snapshots to `data/*.json`.
-The Base44 trigger requests MLB, NCAAFB, NBA, NFL, and WNBA for one UTC date per
-run. Manual workflow inputs remain available for diagnostics. This is Pikkit
-community betting data, not sportsbook-wide handle. See
+The **Pikkit Consensus HTTP Publisher** writes complete per-league snapshots
+to `Pikkit-Consensus/data`. The Base44 trigger requests MLB, NCAAFB, NBA, NFL,
+and WNBA for one UTC date per run. This is Pikkit community betting data, not
+sportsbook-wide handle. See
 [`pikkit-consensus/README.md`](pikkit-consensus/README.md) for setup and limits.

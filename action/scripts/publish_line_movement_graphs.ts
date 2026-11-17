@@ -120,6 +120,36 @@ async function readIndex(): Promise<{ games: GameRecord[]; [key: string]: unknow
   }
 }
 
+function withinRetention(record: GameRecord, now: Date): boolean {
+  const zone = record.sport === 'ncaaf' ? 'America/New_York' : 'America/Chicago';
+  const today = dateInZone(now, zone);
+  const gameDate = String(record.game_date || '').slice(0, 10);
+  return gameDate >= shiftDate(today, -1) && gameDate <= shiftDate(today, 6);
+}
+
+async function pruneUnindexedGameFiles(retainedPaths: Set<string>): Promise<void> {
+  const root = `${OUTPUT_ROOT}/games`;
+  async function visit(directory: string): Promise<void> {
+    let entries: Deno.DirEntry[];
+    try {
+      entries = [...Deno.readDirSync(directory)];
+    } catch (error) {
+      if (error instanceof Deno.errors.NotFound) return;
+      throw error;
+    }
+    for (const entry of entries) {
+      const fullPath = `${directory}/${entry.name}`;
+      if (entry.isDirectory) {
+        await visit(fullPath);
+      } else if (entry.isFile && entry.name.endsWith('.json')) {
+        const relativePath = fullPath.slice(OUTPUT_ROOT.length + 1);
+        if (!retainedPaths.has(relativePath)) await Deno.remove(fullPath);
+      }
+    }
+  }
+  await visit(root);
+}
+
 async function writeJsonIfChanged(path: string, value: unknown): Promise<boolean> {
   const fullPath = `${OUTPUT_ROOT}/${path}`;
   const serialized = JSON.stringify(value);
@@ -178,8 +208,7 @@ async function main() {
   let parsedGameCount = 0;
   let changedRecordCount = 0;
 
-  // Query each sport's local calendar date today through six days ahead. Older
-  // published files remain in the index, preserving graphs after game day.
+  // Query each sport's local calendar date today through six days ahead.
   for (const sport of SPORTS) {
     const zone = sport === 'ncaaf' ? 'America/New_York' : 'America/Chicago';
     const today = dateInZone(now, zone);
@@ -218,18 +247,23 @@ async function main() {
     const sport = String(record?.sport || '') as SportKey;
     const gameDate = String(record?.game_date || record?.gameDate || '').slice(0, 10);
     const gameId = String(record?.game_id || record?.gameId || '');
-    if (sport && gameDate && gameId && record?.path) merged.set(`${sport}|${gameDate}|${gameId}`, record);
+    if (sport && gameDate && gameId && record?.path && withinRetention(record as GameRecord, now)) {
+      merged.set(`${sport}|${gameDate}|${gameId}`, record);
+    }
   }
   for (const [key, record] of nextGames) merged.set(key, record);
 
   const index = {
     schema_version: 1,
     source: 'scoresandodds',
-    generated_at: changedRecordCount > 0 ? updatedAt : previousIndex.generated_at || updatedAt,
+    generated_at: changedRecordCount > 0 || merged.size !== previousIndex.games.length
+      ? updatedAt
+      : previousIndex.generated_at || updatedAt,
     games: [...merged.values()].sort((a, b) =>
       a.game_date.localeCompare(b.game_date) || a.sport.localeCompare(b.sport) || String(a.away_team || '').localeCompare(String(b.away_team || ''))
     ),
   };
+  await pruneUnindexedGameFiles(new Set(index.games.map((record) => record.path)));
   await writeJsonIfChanged('index.json', index);
 
   console.info(`[lineMovement] complete: successfulScopes=${successfulScopes} failedScopes=${failedScopes} parsedGames=${parsedGameCount} changedGames=${changedRecordCount} indexedGames=${index.games.length}`);

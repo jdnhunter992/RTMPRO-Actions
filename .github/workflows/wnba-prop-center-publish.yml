@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}
@@ -28,49 +28,29 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Prepare the published data branch
+      - name: Restore published data from Cloudflare R2
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          DATA_REPOSITORY: ${{ github.repository }}
-          DATA_BRANCH: propline-data
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
         run: |
           set -euo pipefail
-          mkdir -p data
-          git -C data init -b "$DATA_BRANCH"
-          git -C data config user.name 'github-actions[bot]'
-          git -C data config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git -C data remote add origin "https://github.com/${DATA_REPOSITORY}.git"
-          git -C data sparse-checkout init --cone
-          git -C data sparse-checkout set wnba-prop-center
-          token_auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
-          if git -C data -c http.extraheader="AUTHORIZATION: basic ${token_auth}" ls-remote --exit-code --heads origin "$DATA_BRANCH" >/dev/null 2>&1; then
-            git -C data -c http.extraheader="AUTHORIZATION: basic ${token_auth}" fetch --quiet --depth=1 --filter=blob:none origin "$DATA_BRANCH"
-            git -C data checkout -B "$DATA_BRANCH" FETCH_HEAD
-          fi
-
+          python -m pip install --disable-pip-version-check boto3
+          python action/scripts/r2_data.py download --prefix 'propline-data/wnba-prop-center' --dest 'data/wnba-prop-center'
       - name: Fetch WNBA box scores and build prop-center JSON
         env:
           WNBA_PROP_CENTER_OUTPUT_DIR: ${{ github.workspace }}/data
         run: python action/action/scripts/publish_wnba_prop_center.py
 
-      - name: Publish the completed WNBA prop-center generation
+      - name: Publish the WNBA prop-center generation to R2
         working-directory: data
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          DATA_BRANCH: propline-data
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
         run: |
           set -euo pipefail
-          git add -A -- wnba-prop-center
-          mapfile -t staged_paths < <(git diff --cached --name-only)
-          for path in "${staged_paths[@]}"; do
-            case "$path" in
-              wnba-prop-center/*) ;;
-              *) echo "Refusing to publish unexpected staged path: $path" >&2; exit 1 ;;
-            esac
-          done
-          if git diff --cached --quiet; then
-            echo 'WNBA prop-center JSON is unchanged.'
-            exit 0
-          fi
-          git commit -qm 'Refresh WNBA prop-center JSON'
-          bash ../action/scripts/push_data_branch.sh "$DATA_BRANCH"
+          python -m pip install --disable-pip-version-check boto3
+          python ../action/scripts/r2_data.py sync --root . --map 'wnba-prop-center'='propline-data/wnba-prop-center'

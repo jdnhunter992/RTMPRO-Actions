@@ -10,7 +10,7 @@ on:
         default: false
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: cfb-team-stats-publisher
@@ -32,21 +32,20 @@ jobs:
         with:
           deno-version: v2.x
 
-      - name: Check out the published CFB data branch
-        uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
-          repository: ${{ github.repository }}
-          ref: cfb-team-stats-data
-          token: ${{ secrets.GITHUB_TOKEN }}
-          persist-credentials: true
-          fetch-depth: 1
-          path: data
+          python-version: '3.12'
 
-      - name: Configure data commit identity
-        working-directory: data
+      - name: Restore published data from Cloudflare R2
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
         run: |
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check boto3
+          python action/scripts/r2_data.py download --prefix 'cfb-team-stats-data/cfb-team-stats' --dest 'data/cfb-team-stats'
 
       - name: Fetch, calculate, and materialize all CFB timeframes
         env:
@@ -54,10 +53,14 @@ jobs:
           CFB_REFRESH_PREVIOUS_SEASON: ${{ github.event.inputs.refresh_previous || 'false' }}
         run: deno run --node-modules-dir=auto --allow-net --allow-env --allow-read --allow-write action/scripts/refresh_cfb_team_stats_github.ts
 
-      - name: Publish CFB stats cache
+      - name: Publish CFB stats cache to R2
         working-directory: data
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
         run: |
-          git add cfb-team-stats
-          if git diff --cached --quiet; then exit 0; fi
-          git commit -qm 'Refresh CFB team stats cache'
-          git push --quiet origin HEAD:cfb-team-stats-data
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check boto3
+          python ../action/scripts/r2_data.py sync --root . --map 'cfb-team-stats'='cfb-team-stats-data/cfb-team-stats'

@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: cfb-player-game-logs-publisher
@@ -30,6 +30,16 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Restore published data from Cloudflare R2
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check boto3
+          python action/scripts/r2_data.py download --prefix 'cfb-player-game-logs-data/cfb-player-game-logs' --dest 'data/cfb-player-game-logs'
       - name: Prepare CFB receiving target data
         env:
           CFB_PLAYER_LOGS_OUTPUT_DIR: ${{ github.workspace }}/data
@@ -37,36 +47,19 @@ jobs:
           python -m pip install --disable-pip-version-check pyarrow
           python action/scripts/export_cfb_player_targets.py
 
-      - name: Prepare the player-log data branch
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          DATA_BRANCH: cfb-player-game-logs-data
-        run: |
-          mkdir -p data
-          cd data
-          git init -b "$DATA_BRANCH"
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          if git ls-remote --exit-code --heads origin "$DATA_BRANCH" >/dev/null 2>&1; then
-            git fetch --depth=1 origin "$DATA_BRANCH"
-            git reset --hard FETCH_HEAD
-          fi
-
       - name: Fetch bulk CFB data and build player logs
         env:
           CFB_PLAYER_LOGS_OUTPUT_DIR: ${{ github.workspace }}/data
         run: deno run --allow-net --allow-env --allow-read --allow-write action/scripts/refresh_cfb_player_game_logs_github.ts
 
-      - name: Publish normalized player logs
+      - name: Publish normalized player logs to R2
         working-directory: data
         env:
-          DATA_BRANCH: cfb-player-game-logs-data
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
         run: |
-          git add cfb-player-game-logs
-          if git diff --cached --quiet; then
-            echo 'Player game-log cache is unchanged.'
-            exit 0
-          fi
-          git commit -qm 'Refresh CFB player game-log cache'
-          git push --quiet origin "HEAD:${DATA_BRANCH}"
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check boto3
+          python ../action/scripts/r2_data.py sync --root . --map 'cfb-player-game-logs'='cfb-player-game-logs-data/cfb-player-game-logs'

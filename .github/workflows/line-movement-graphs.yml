@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}
@@ -27,37 +27,34 @@ jobs:
         with:
           deno-version: v2.x
 
-      - name: Check out the published data branch
-        uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
-          repository: ${{ github.repository }}
-          ref: propline-data
-          token: ${{ secrets.GITHUB_TOKEN }}
-          persist-credentials: false
-          fetch-depth: 1
-          filter: blob:none
-          sparse-checkout: |
-            line-movement-graphs/v1
-          sparse-checkout-cone-mode: true
-          path: data
+          python-version: '3.12'
 
-      - name: Configure data commit identity
-        working-directory: data
+      - name: Restore published data from Cloudflare R2
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
         run: |
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check boto3
+          python action/scripts/r2_data.py download --prefix 'propline-data/line-movement-graphs/v1' --dest 'data/line-movement-graphs/v1'
 
       - name: Scrape and publish ScoresAndOdds line movement graphs
         env:
           LINE_MOVEMENT_OUTPUT_DIR: ${{ github.workspace }}/data/line-movement-graphs/v1
         run: deno run --no-check --allow-net --allow-read --allow-write --allow-env=LINE_MOVEMENT_OUTPUT_DIR action/action/scripts/publish_line_movement_graphs.ts
 
-      - name: Publish updated per-game graph files
+      - name: Publish line movement graphs to R2
         working-directory: data
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
         run: |
-          git add line-movement-graphs/v1
-          if git diff --cached --quiet; then exit 0; fi
-          git commit -qm 'Publish ScoresAndOdds line movement graphs'
-          bash ../action/scripts/push_data_branch.sh propline-data
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check boto3
+          python ../action/scripts/r2_data.py sync --root . --map 'line-movement-graphs/v1'='propline-data/line-movement-graphs/v1'
