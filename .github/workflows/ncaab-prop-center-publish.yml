@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: ${{ github.workflow }}
@@ -28,29 +28,16 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Restore published data from Cloudflare R2
+      - name: Restore ncaab-prop-center-data Git snapshot
         env:
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
-          R2_BUCKET: ${{ vars.R2_BUCKET }}
-        run: |
-          set -euo pipefail
-          python -m pip install --disable-pip-version-check boto3
-          python action/scripts/r2_data.py download --prefix 'propline-data/ncaab-prop-center' --dest 'data/ncaab-prop-center'
+          GH_TOKEN: ${{ github.token }}
+        run: python action/scripts/snapshot_git.py restore --branch 'ncaab-prop-center-data' --path 'ncaab-prop-center'
       - name: Fetch SportsDataverse data and build NCAAB Team Stats JSON
         env:
           NCAAB_PROP_CENTER_OUTPUT_DIR: ${{ github.workspace }}/data
         run: python action/action/scripts/publish_ncaab_prop_center.py
 
-      - name: Publish the NCAAB prop-center generation to R2
-        working-directory: data
+      - name: Publish ncaab-prop-center-data Git snapshot
         env:
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
-          R2_BUCKET: ${{ vars.R2_BUCKET }}
-        run: |
-          set -euo pipefail
-          python -m pip install --disable-pip-version-check boto3
-          python ../action/scripts/r2_data.py sync --root . --map 'ncaab-prop-center'='propline-data/ncaab-prop-center'
+          GH_TOKEN: ${{ github.token }}
+        run: python action/scripts/snapshot_git.py publish --branch 'ncaab-prop-center-data' --path 'ncaab-prop-center'
