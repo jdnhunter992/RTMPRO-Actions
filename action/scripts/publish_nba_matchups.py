@@ -19,12 +19,13 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 OUTPUT_ROOT = Path(os.environ.get('NBA_MATCHUPS_OUTPUT_DIR', '.')).expanduser()
-R2_PUBLIC_ROOT = 'https://data.rtmpro.org'
-DATA_RAW = f'{R2_PUBLIC_ROOT}/propline-data'
+GITHUB_RAW_ROOT = 'https://raw.githubusercontent.com/jdnhunter992/RTMPRO-Actions/refs/heads'
+DATA_RAW = f'{GITHUB_RAW_ROOT}/propline-player-odds-data'
+NBA_PROFILES_RAW = f'{GITHUB_RAW_ROOT}/nba-prop-center-data'
 NBA_SCOREBOARD = 'https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard'
 NBA_SHOTS_RELEASE = 'https://api.github.com/repos/sportsdataverse/sportsdataverse-data/releases/tags/espn_nba_shots'
 NBA_SCHEDULE_ROOT = 'https://github.com/sportsdataverse/sportsdataverse-data/releases/download/espn_nba_schedules'
-NBA_INJURY_URL = f'{R2_PUBLIC_ROOT}/nba-injury-report-data/nba-injuries/v1/latest.json'
+NBA_INJURY_URL = f'{GITHUB_RAW_ROOT}/nba-injury-report-data/nba-injuries/v1/latest.json'
 HEADERS = {'User-Agent': 'SportsEdgeAI-NBA-Matchups-Publisher/1.0', 'Accept': 'application/json,text/csv,application/octet-stream,*/*'}
 ZONE_NAMES = {
     'restricted_area': 'At the rim', 'paint_non_restricted': 'Paint', 'mid_range': 'Mid-range',
@@ -282,7 +283,7 @@ def get_today_prop_games(payload, today, games):
 
 
 def load_manifest():
-    url = f'{DATA_RAW}/nba-prop-center/v1/latest.json'
+    url = f'{NBA_PROFILES_RAW}/nba-prop-center/v1/latest.json'
     manifest = request_json(url)
     if manifest.get('success') is False or not manifest.get('playerLookup'):
         raise RuntimeError('Published NBA PropLine player profiles are unavailable.')
@@ -312,7 +313,7 @@ def fetch_player_season(player, manifest, season):
     if not entry:
         return player, None
     path = str(entry.get('file') or '').lstrip('/')
-    url = f'{DATA_RAW}/nba-prop-center/v1/{urllib.parse.quote(path, safe="/-._")}'
+    url = f'{NBA_PROFILES_RAW}/nba-prop-center/v1/{urllib.parse.quote(path, safe="/-._")}'
     try:
         raw = request_bytes(url, 'application/json,application/octet-stream', timeout=45)
         if path.endswith('.gz'):
