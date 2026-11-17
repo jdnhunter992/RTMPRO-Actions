@@ -173,7 +173,15 @@ def main():
         if not re.fullmatch(r'[A-Za-z0-9_-]+', sheet) or not gid.isdigit():
             raise ValueError('Missing or invalid sheet mapping')
         url = BASE + '/team-pages/api/sheets/' + sheet + '/data?gid=' + gid
-        payload = json.loads(fetch(url))
+        body = fetch(url)
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError as error:
+            preview = re.sub(r'\\s+', ' ', body[:240]).strip()
+            raise ValueError(
+                f'Non-JSON response from CFBDepth sheet API '
+                f'(body_length={len(body)}, first_chars={preview!r}): {error}'
+            ) from error
         result = parse(payload, team)
         result['source_url'] = url
         result['page_url'] = BASE + '/' + slug + '/injury-status'
@@ -195,8 +203,25 @@ def main():
     registry_slugs = {str(team['slug']).lower() for team in registry}
     teams_by_slug = {slug: team for slug, team in previous_by_slug.items() if slug in registry_slugs}
     errors, refreshed_slugs, stale_slugs = [], set(), set()
+    # Probe one team before fanning out. A changed source response format
+    # otherwise causes 138 identical failed requests (and another 138 retries).
+    probe = selected[0] if selected else None
+    if probe:
+        try:
+            first_result = collect(probe)
+            teams_by_slug[probe['slug'].lower()] = first_result
+            refreshed_slugs.add(probe['slug'].lower())
+            print(f"OK {probe['slug']}: {len(first_result['active'])} active", flush=True)
+        except Exception as error:
+            if 'Non-JSON response from CFBDepth sheet API' in str(error):
+                raise RuntimeError(
+                    f"Shared CFBDepth sheet API failure for {probe['slug']}: {error}. "
+                    "Stopping before requesting every team; existing published data remains unchanged."
+                ) from error
+            print(f"PROBE FAILED {probe['slug']}: {error}; continuing remaining teams", flush=True)
+    remaining = [team for team in selected if not probe or team['slug'] != probe['slug']]
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(args.workers, 8))) as pool:
-        futures = {pool.submit(collect, t): t for t in selected}
+        futures = {pool.submit(collect, t): t for t in remaining}
         for future in concurrent.futures.as_completed(futures):
             t = futures[future]
             try:
