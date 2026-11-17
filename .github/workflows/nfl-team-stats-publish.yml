@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: nfl-team-stats-publisher
@@ -30,30 +30,17 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Restore published data from Cloudflare R2
+      - name: Restore nfl-team-stats-data Git snapshot
         env:
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
-          R2_BUCKET: ${{ vars.R2_BUCKET }}
-        run: |
-          set -euo pipefail
-          python -m pip install --disable-pip-version-check boto3
-          python scripts/r2_data.py download --prefix 'nfl-team-stats-data/nfl-team-stats' --dest 'data/nfl-team-stats'
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/snapshot_git.py restore --branch 'nfl-team-stats-data' --path 'nfl-team-stats'
       - name: Refresh all NFL teams and timeframes
         env:
           NFL_TEAM_STATS_OUTPUT_DIR: ${{ github.workspace }}/data
           STATRANKINGS_COOKIE: ${{ secrets.STATRANKINGS_COOKIE }}
         run: deno run --allow-net --allow-env --allow-read --allow-write action/scripts/refresh_nfl_team_stats_github.ts
 
-      - name: Publish NFL stats cache to R2
-        working-directory: data
+      - name: Publish nfl-team-stats-data Git snapshot
         env:
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
-          R2_BUCKET: ${{ vars.R2_BUCKET }}
-        run: |
-          set -euo pipefail
-          python -m pip install --disable-pip-version-check boto3
-          python ../scripts/r2_data.py sync --root . --map 'nfl-team-stats'='nfl-team-stats-data/nfl-team-stats'
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/snapshot_git.py publish --branch 'nfl-team-stats-data' --path 'nfl-team-stats'
