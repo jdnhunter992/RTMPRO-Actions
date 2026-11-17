@@ -132,6 +132,12 @@ def request_bytes(url, accept=None, timeout=90, attempts=4):
     headers = dict(HEADERS)
     if accept:
         headers['Accept'] = accept
+    # GitHub Actions runners share a restrictive unauthenticated API rate limit.
+    # Authenticate only GitHub API calls, never third-party or release-asset URLs.
+    token = os.environ.get('GH_TOKEN') or os.environ.get('GITHUB_TOKEN')
+    if token and urllib.parse.urlsplit(url).hostname == 'api.github.com':
+        headers['Authorization'] = f'Bearer {token}'
+        headers['X-GitHub-Api-Version'] = '2022-11-28'
     last = None
     for attempt in range(attempts):
         try:
