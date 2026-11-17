@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: ${{ github.workflow }}
@@ -27,38 +27,17 @@ jobs:
           PROPLINE_API_KEY: ${{ secrets.PROPLINE_API_KEY }}
         run: test -n "$PROPLINE_API_KEY" || { echo 'Add repository secret PROPLINE_API_KEY'; exit 1; }
 
-      - name: Restore published data from Cloudflare R2
+      - name: Restore propline-player-odds-data Git snapshot
         env:
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
-          R2_BUCKET: ${{ vars.R2_BUCKET }}
-        run: |
-          set -euo pipefail
-          python -m pip install --disable-pip-version-check boto3
-          python action/scripts/r2_data.py download --prefix 'propline-data/Player Odds' --dest 'data/Player Odds'
-          python action/scripts/r2_data.py download --prefix 'propline-data/team-rosters' --dest 'data/team-rosters'
-          python action/scripts/r2_data.py download-key --key 'propline-data/manifest.json' --dest 'data/manifest.json'
-
+          GH_TOKEN: ${{ github.token }}
+        run: python action/scripts/snapshot_git.py restore --branch 'propline-player-odds-data' --path 'Player Odds' --path 'Player Lists' --path 'manifest.json' --path 'team-rosters'
       - name: Fetch and build complete JSON generation
         env:
           PROPLINE_API_KEY: ${{ secrets.PROPLINE_API_KEY }}
           PROPLINE_OUTPUT_DIR: ${{ github.workspace }}/data
         run: python3 action/scripts/publish_propline.py
 
-      - name: Publish PropLine data to R2
-        working-directory: data
+      - name: Publish propline-player-odds-data Git snapshot
         env:
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
-          R2_BUCKET: ${{ vars.R2_BUCKET }}
-        run: |
-          set -euo pipefail
-          python -m pip install --disable-pip-version-check boto3
-          python ../action/scripts/r2_data.py sync --root . --map 'Player Odds'='propline-data/Player Odds'
-          python ../action/scripts/r2_data.py sync --root . --map 'Player Lists'='propline-data/Player Lists'
-          python ../action/scripts/r2_data.py sync --root . --map 'manifest.json'='propline-data/manifest.json'
-          python ../action/scripts/r2_data.py sync --root . --map 'team-rosters'='propline-data/team-rosters'
-          python ../action/scripts/r2_data.py delete --prefix propline-data/versions
-          python ../action/scripts/r2_data.py delete --prefix propline-data/player-lists
+          GH_TOKEN: ${{ github.token }}
+        run: python action/scripts/snapshot_git.py publish --branch 'propline-player-odds-data' --path 'Player Odds' --path 'Player Lists' --path 'manifest.json' --path 'team-rosters'
