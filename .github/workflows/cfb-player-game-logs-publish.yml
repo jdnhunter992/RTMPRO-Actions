@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: cfb-player-game-logs-publisher
@@ -30,16 +30,10 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Restore published data from Cloudflare R2
+      - name: Restore cfb-player-game-logs-data Git snapshot
         env:
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
-          R2_BUCKET: ${{ vars.R2_BUCKET }}
-        run: |
-          set -euo pipefail
-          python -m pip install --disable-pip-version-check boto3
-          python action/scripts/r2_data.py download --prefix 'cfb-player-game-logs-data/cfb-player-game-logs' --dest 'data/cfb-player-game-logs'
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/snapshot_git.py restore --branch 'cfb-player-game-logs-data' --path 'cfb-player-game-logs'
       - name: Prepare CFB receiving target data
         env:
           CFB_PLAYER_LOGS_OUTPUT_DIR: ${{ github.workspace }}/data
@@ -52,14 +46,7 @@ jobs:
           CFB_PLAYER_LOGS_OUTPUT_DIR: ${{ github.workspace }}/data
         run: deno run --allow-net --allow-env --allow-read --allow-write action/scripts/refresh_cfb_player_game_logs_github.ts
 
-      - name: Publish normalized player logs to R2
-        working-directory: data
+      - name: Publish cfb-player-game-logs-data Git snapshot
         env:
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
-          R2_BUCKET: ${{ vars.R2_BUCKET }}
-        run: |
-          set -euo pipefail
-          python -m pip install --disable-pip-version-check boto3
-          python ../action/scripts/r2_data.py sync --root . --map 'cfb-player-game-logs'='cfb-player-game-logs-data/cfb-player-game-logs'
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/snapshot_git.py publish --branch 'cfb-player-game-logs-data' --path 'cfb-player-game-logs'
