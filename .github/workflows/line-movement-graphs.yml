@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: ${{ github.workflow }}
@@ -31,30 +31,16 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Restore published data from Cloudflare R2
+      - name: Restore line-movement-graphs-data Git snapshot
         env:
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
-          R2_BUCKET: ${{ vars.R2_BUCKET }}
-        run: |
-          set -euo pipefail
-          python -m pip install --disable-pip-version-check boto3
-          python action/scripts/r2_data.py download --prefix 'propline-data/line-movement-graphs/v1' --dest 'data/line-movement-graphs/v1'
-
+          GH_TOKEN: ${{ github.token }}
+        run: python action/scripts/snapshot_git.py restore --branch 'line-movement-graphs-data' --path 'line-movement-graphs/v1'
       - name: Scrape and publish ScoresAndOdds line movement graphs
         env:
           LINE_MOVEMENT_OUTPUT_DIR: ${{ github.workspace }}/data/line-movement-graphs/v1
         run: deno run --no-check --allow-net --allow-read --allow-write --allow-env=LINE_MOVEMENT_OUTPUT_DIR action/action/scripts/publish_line_movement_graphs.ts
 
-      - name: Publish line movement graphs to R2
-        working-directory: data
+      - name: Publish line-movement-graphs-data Git snapshot
         env:
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
-          R2_BUCKET: ${{ vars.R2_BUCKET }}
-        run: |
-          set -euo pipefail
-          python -m pip install --disable-pip-version-check boto3
-          python ../action/scripts/r2_data.py sync --root . --map 'line-movement-graphs/v1'='propline-data/line-movement-graphs/v1'
+          GH_TOKEN: ${{ github.token }}
+        run: python action/scripts/snapshot_git.py publish --branch 'line-movement-graphs-data' --path 'line-movement-graphs/v1'
