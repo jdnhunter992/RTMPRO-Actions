@@ -35,7 +35,7 @@ jobs:
       - name: Build this week’s NFL matchup recommendations
         env:
           NFL_MATCHUPS_OUTPUT_DIR: ${{ github.workspace }}/data
-        run: python action/action/scripts/publish_nfl_matchups.py
+        run: python action/scripts/publish_nfl_matchups.py
 
       - name: Publish nfl-matchups-data Git snapshot
         env:
