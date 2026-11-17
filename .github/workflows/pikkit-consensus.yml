@@ -1,0 +1,100 @@
+name: Pikkit Consensus HTTP Publisher
+on:
+  workflow_dispatch:
+    inputs:
+      leagues:
+        description: 'League codes, comma separated, or all (NCAAB is always included and queried from Pikkit as NCAAM)'
+        default: 'all'
+        required: false
+      days:
+        description: 'Maximum date window: MLB/NBA/NCAAB/WNBA/NHL use 1 day; NFL/NCAAFB use up to 7 days'
+        default: '7'
+        required: false
+permissions:
+  contents: write
+concurrency:
+  group: pikkit-consensus-publisher
+  cancel-in-progress: false
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    env:
+      LEAGUES: ${{ inputs.leagues || 'all' }}
+      DAYS_AHEAD: ${{ inputs.days || '7' }}
+      EVENT_DELAY_MIN_SECONDS: '5'
+      EVENT_DELAY_MAX_SECONDS: '10'
+      PUBLISH_BRANCH: 'Pikkit-Consensus'
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Collect consensus
+        env:
+          PIKKIT_AUTH_TOKEN: ${{ secrets.PIKKIT_AUTH_TOKEN }}
+        run: python3 scripts/collect.py --out /tmp/pikkit-consensus-data
+      - name: Publish JSON feeds
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          if git fetch origin "refs/heads/$PUBLISH_BRANCH:refs/remotes/origin/$PUBLISH_BRANCH"; then
+            git checkout -B "$PUBLISH_BRANCH" "origin/$PUBLISH_BRANCH"
+          else
+            git checkout --orphan "$PUBLISH_BRANCH"
+            git rm -rf . >/dev/null 2>&1 || true
+          fi
+          python3 - <<'PY'
+          import json, re, shutil
+          from pathlib import Path
+          source = Path('/tmp/pikkit-consensus-data')
+          destination = Path('data')
+          indexes = sorted(source.glob('*.json'))
+          if not indexes:
+              raise SystemExit('Collector produced no sport indexes')
+          for index in indexes:
+              doc = json.loads(index.read_text())
+              league = doc.get('league')
+              if not isinstance(league, str) or not re.fullmatch(r'[A-Za-z0-9_-]+', league):
+                  raise SystemExit(f'Invalid league in {index}')
+              slug = league.lower()
+              if index.name != f'{slug}.json' or doc.get('complete') is not True or not isinstance(doc.get('events'), list):
+                  raise SystemExit(f'Invalid sport index: {index}')
+              incoming = []
+              expected_names = set()
+              for event in doc['events']:
+                  event_id = event.get('event_id')
+                  if not isinstance(event_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]+', event_id):
+                      raise SystemExit(f'Invalid event ID in {index}')
+                  filename = f'{event_id}.json'
+                  rel_path = f'events/{slug}/{filename}'
+                  if event.get('detail_path') != rel_path or filename in expected_names:
+                      raise SystemExit(f'Invalid or duplicate detail_path for {event_id}')
+                  detail_source = source / rel_path
+                  detail = json.loads(detail_source.read_text())
+                  if detail.get('complete') is not True or detail.get('event_id') != event_id:
+                      raise SystemExit(f'Invalid event detail file: {detail_source}')
+                  incoming.append((detail_source, filename))
+                  expected_names.add(filename)
+              target_events = destination / 'events' / slug
+              target_events.mkdir(parents=True, exist_ok=True)
+              for existing in target_events.glob('*.json'):
+                  if existing.name not in expected_names:
+                      existing.unlink()
+              for detail_source, filename in incoming:
+                  shutil.copy2(detail_source, target_events / filename)
+              shutil.copy2(index, destination / index.name)
+          PY
+          git add -A data/
+          if ! git diff --staged --quiet; then
+            git commit -m 'Refresh Pikkit community consensus'
+            git push origin "HEAD:$PUBLISH_BRANCH"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pikkit-consensus-json
+          path: |
+            /tmp/pikkit-consensus-data/*.json
+            /tmp/pikkit-consensus-data/events/**/*.json
+          if-no-files-found: warn

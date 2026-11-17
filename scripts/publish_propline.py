@@ -1,0 +1,1076 @@
+#!/usr/bin/env python3
+"""Fetch PropLine bulk odds and publish per-player JSON to the private data branch."""
+import csv, gzip, hashlib, io, json, os, re, time, urllib.request, urllib.error, unicodedata
+from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+from datetime import datetime, timezone
+
+API='https://api.prop-line.com/v1'
+OPENING_WINDOW_DAYS=14
+SPORTS={
+ 'nfl':('football_nfl','player_1st_td player_2plus_td player_3plus_td player_anytime_td player_extra_points_made player_field_goals_made player_fumbles_lost player_kicking_points player_last_td player_longest_completion player_pass_attempts player_pass_completions player_pass_interceptions player_pass_rush_yds player_pass_tds player_pass_yds player_reception_longest player_receptions player_reception_yds player_rush_attempts player_rush_longest player_rush_reception_yds player_rush_tds player_rush_yds'),
+ 'nba':('basketball_nba','player_assists player_blocks player_double_double player_points player_points_10plus player_points_15plus player_points_assists player_points_rebounds player_points_rebounds_assists player_rebounds player_rebounds_assists player_steals player_threes'),
+ 'ncaab':('basketball_ncaab','player_assists player_blocks player_points player_points_assists player_points_rebounds player_points_rebounds_assists player_rebounds player_rebounds_assists player_steals player_threes'),
+ 'mlb':('baseball_mlb','batter_1plus_hits batter_1plus_rbis batter_2plus_hits batter_2plus_home_runs batter_2plus_rbis batter_3plus_hits batter_3plus_rbis batter_4plus_hits batter_doubles batter_hits batter_hits_runs_rbis batter_home_runs batter_rbis batter_runs batter_singles batter_stolen_bases batter_strikeouts batter_total_bases batter_triples batter_walks pitcher_earned_runs pitcher_hits_allowed pitcher_outs pitcher_strikeouts pitcher_walks'),
+ 'wnba':('basketball_wnba','player_assists player_blocks player_double_double player_first_basket player_first_field_goal player_points player_points_10plus player_points_15plus player_points_assists player_points_rebounds player_points_rebounds_assists player_rebounds player_rebounds_assists player_steals player_threes player_triple_double player_turnovers'),
+ 'nhl':('hockey_nhl','player_goals player_first_goal player_goals_2plus player_goals_3plus player_shots_on_goal player_points_1plus player_points_2plus player_points_3plus goalie_saves player_blocked_shots'),
+ 'cfb':('football_ncaaf','player_1st_td player_2plus_td player_3plus_td player_anytime_td player_pass_tds player_pass_yds player_receptions player_reception_yds player_rush_longest player_rush_yds'),
+}
+# Run the same opening-line enrichment for every league fetched above.
+OPENING_SPORTS=set(SPORTS)
+PLAYER_MARKETS={
+ 'nfl':{'player_pass_yds':'passing_yards','player_pass_tds':'passing_tds','player_pass_completions':'passing_completions','player_pass_attempts':'passing_attempts','player_pass_interceptions':'interceptions_thrown','player_rush_yds':'rushing_yards','player_rush_longest':'longest_rush','player_rush_tds':'rushing_tds','player_rush_attempts':'rushing_attempts','player_reception_yds':'receiving_yards','player_receptions':'receptions','player_anytime_td':'anytime_touchdown','player_rush_reception_yds':'rush_rec_yards'},
+ 'cfb':{'player_pass_yds':'passing_yards','player_pass_tds':'passing_tds','player_pass_completions':'passing_completions','player_rush_yds':'rushing_yards','player_rush_longest':'longest_rush','player_rush_tds':'rushing_tds','player_reception_yds':'receiving_yards','player_receptions':'receptions','player_anytime_td':'anytime_touchdown'},
+ 'mlb':{'batter_hits':'hits','batter_total_bases':'total_bases','batter_home_runs':'home_runs','batter_runs':'runs','batter_rbis':'rbi','batter_singles':'singles','batter_doubles':'doubles','batter_walks':'walks','pitcher_strikeouts':'strikeouts','batter_strikeouts':'strikeouts_batter','batter_stolen_bases':'stolen_bases','pitcher_outs':'pitcher_outs','pitcher_earned_runs':'earned_runs','pitcher_hits_allowed':'hits_allowed','pitcher_walks':'walks_allowed','batter_hits_runs_rbis':'hits_runs_rbis'},
+ 'wnba':{'player_points':'points','player_rebounds':'rebounds','player_assists':'assists','player_threes':'three_pointers_made','player_blocks':'blocks','player_steals':'steals','player_turnovers':'turnovers','player_points_rebounds_assists':'pra','player_points_rebounds':'points_rebounds','player_points_assists':'points_assists','player_rebounds_assists':'rebounds_assists','player_double_double':'double_double','player_triple_double':'triple_double','player_first_basket':'first_basket'},
+ 'nba':{'player_points':'points','player_rebounds':'rebounds','player_assists':'assists','player_threes':'three_pointers_made','player_blocks':'blocks','player_steals':'steals','player_points_rebounds_assists':'pra','player_points_rebounds':'points_rebounds','player_points_assists':'points_assists','player_rebounds_assists':'rebounds_assists'},
+ 'ncaab':{'player_points':'points','player_rebounds':'rebounds','player_assists':'assists','player_threes':'three_pointers_made','player_blocks':'blocks','player_steals':'steals','player_points_rebounds_assists':'pra','player_points_rebounds':'points_rebounds','player_points_assists':'points_assists','player_rebounds_assists':'rebounds_assists'},
+ 'nhl':{'player_goals':'goals','player_first_goal':'first_goal','player_goals_2plus':'goals_2plus','player_goals_3plus':'goals_3plus','player_shots_on_goal':'shots_on_goal','player_points_1plus':'points_1plus','player_points_2plus':'points_2plus','player_points_3plus':'points_3plus','goalie_saves':'goalie_saves','player_blocked_shots':'blocked_shots'},
+}
+def slug(s):
+ s=unicodedata.normalize('NFKD',str(s)).encode('ascii','ignore').decode().lower()
+ return re.sub(r'[^a-z0-9]+','-',s).strip('-') or 'unknown'
+def fetch(sport,key):
+ from urllib.parse import urlencode
+ provider,markets=SPORTS[sport]
+ url=f'{API}/sports/{provider}/odds?'+urlencode({'markets':','.join(markets.split())})
+ for attempt in range(2):
+  try:
+   req=urllib.request.Request(url,headers={'X-API-Key':key,'Accept':'application/json'})
+   with urllib.request.urlopen(req,timeout=65) as res: body=json.load(res)
+   if isinstance(body,list): return body
+   if isinstance(body,dict) and isinstance(body.get('events'),list): return body['events']
+   raise ValueError(f'{sport}: unexpected PropLine response shape')
+  except (urllib.error.URLError,TimeoutError) as e:
+   if attempt: raise
+   time.sleep(3)
+ raise RuntimeError('unreachable')
+def fetch_closing(sport,event_id,key):
+ from urllib.parse import urlencode
+ provider,markets=SPORTS[sport]
+ url=f'{API}/sports/{provider}/events/{event_id}/odds/closing?'+urlencode({
+   'markets':','.join(markets.split()),'opening_window':OPENING_WINDOW_DAYS})
+ for attempt in range(2):
+  try:
+   req=urllib.request.Request(url,headers={'X-API-Key':key,'Accept':'application/json'})
+   with urllib.request.urlopen(req,timeout=45) as res: return json.load(res)
+  except urllib.error.HTTPError as e:
+   # Opening history is enrichment only. Never destroy the live-odds publish
+   # because one event has no history yet or PropLine temporarily rejects it.
+   if e.code in (400,404,409,422): return None
+   if attempt: raise
+   time.sleep(2)
+  except (urllib.error.URLError,TimeoutError):
+   if attempt: raise
+   time.sleep(2)
+ return None
+
+def norm(v):
+ return unicodedata.normalize('NFKD',str(v or '')).encode('ascii','ignore').decode().lower().strip()
+
+def team_match_key(value):
+ """Normalize provider team labels to ESPN school identities."""
+ tokens=re.sub(r'[^a-z0-9]+',' ',norm(value)).split()
+ tokens=[{'st':'state','mt':'mount','ft':'fort'}.get(token,token) for token in tokens]
+ return ''.join(tokens)
+
+def player_identity(value,name,team=None):
+ raw=str(value or '').strip()
+ if raw:
+  if raw.lower().startswith('espn:'): raw=raw.split(':',1)[1].strip()
+  return 'id:'+raw.casefold()
+ return 'name:'+norm(name)+'|team:'+norm(team)
+
+PLAYER_SUFFIXES={'jr','junior','sr','senior','ii','iii','iv','v','2nd','3rd'}
+def player_name_tokens(value):
+ name=str(value or '').strip()
+ # Provider feeds sometimes include a school/team qualifier in parentheses.
+ name=re.sub(r'\s*\([^)]*\)\s*$', '', name)
+ tokens=re.sub(r'[^a-z0-9]+',' ',norm(name)).split()
+ while len(tokens)>1 and tokens[-1] in PLAYER_SUFFIXES: tokens.pop()
+ # Normalize initialed first names (T.Y. Harding -> Ty Harding).
+ initial_count=0
+ while initial_count<len(tokens) and len(tokens[initial_count])==1: initial_count+=1
+ if initial_count>1:
+  tokens=[''.join(tokens[:initial_count]),*tokens[initial_count:]]
+ return tokens
+
+def cfb_roster_name_tokens(value):
+ tokens=player_name_tokens(value)
+ # PropLine shortens William "Pop" Watson III to Pop Watson III.
+ if len(tokens)>=2 and tokens[0]=='pop' and tokens[-1]=='watson':
+  tokens=['william',*tokens[1:]]
+ return tokens
+
+def roster_name_match(left,right):
+ a=cfb_roster_name_tokens(left); b=cfb_roster_name_tokens(right)
+ if not a or not b: return False
+ if a==b: return True
+ # Permit a shortened first name only when the surname matches exactly;
+ # event-team filtering below prevents cross-team name collisions.
+ return len(a)>=2 and len(b)>=2 and a[-1]==b[-1] and min(len(a[0]),len(b[0]))>=3 and (a[0].startswith(b[0]) or b[0].startswith(a[0]))
+
+def roster_candidates_for_name(roster_index,name,sport,allowed=None,team_id=None):
+ allowed={str(value) for value in (allowed or set())}
+ keys={norm(name),' '.join(player_name_tokens(name))}
+ if sport=='cfb': keys.add(' '.join(cfb_roster_name_tokens(name)))
+ exact=[]
+ for key in keys:
+  exact.extend(roster_index.get('by_name',{}).get(key,[]))
+  exact.extend(roster_index.get('by_tokens',{}).get(key,[]))
+ if exact:
+  allowed_exact=[row for row in exact if isinstance(row,dict) and (not team_id or str(row.get('id') or '')==str(team_id)) and (team_id or not allowed or str(row.get('id') or '') in allowed)]
+  if allowed_exact:
+   unique={}
+   for row in allowed_exact:
+    row_name=str(row.get('name') or '')
+    key=(str(row.get('id') or ''),' '.join(cfb_roster_name_tokens(row_name) if sport=='cfb' else player_name_tokens(row_name)))
+    existing=unique.get(key)
+    if not existing or (not has_position(existing.get('position')) and has_position(row.get('position'))): unique[key]=row
+   return list(unique.values())
+ if sport!='cfb': return []
+ rows=[]
+ for collection in (roster_index.get('by_id',{}).values(),*roster_index.get('by_name',{}).values(),*roster_index.get('by_tokens',{}).values()):
+  for row in collection:
+   if not isinstance(row,dict): continue
+   row_team=str(row.get('id') or '')
+   if team_id and row_team!=str(team_id): continue
+   if not team_id and allowed and row_team not in allowed: continue
+   rows.append(row)
+ unique={}
+ for row in rows:
+  row_name=str(row.get('name') or '')
+  if not row_name: continue
+  identity=(str(row.get('id') or ''),' '.join(cfb_roster_name_tokens(row_name)))
+  existing=unique.get(identity)
+  if not existing or (not has_position(existing.get('position')) and has_position(row.get('position'))): unique[identity]=row
+ rows=list(unique.values())
+ return [row for row in rows if roster_name_match(name,row.get('name'))]
+
+def player_name_similarity(left,right):
+ a=player_name_tokens(left); b=player_name_tokens(right)
+ if not a or not b: return 0.0
+ used=set(); matched=0.0
+ for token in a:
+  options=[]
+  for i,other in enumerate(b):
+   if i in used: continue
+   if token==other: score=1.0
+   elif len(token)==1 and other.startswith(token) or len(other)==1 and token.startswith(other): score=0.72
+   elif min(len(token),len(other))>3:
+    from difflib import SequenceMatcher
+    score=SequenceMatcher(None,token,other).ratio()
+   else: score=0.0
+   options.append((score,i))
+  score,i=max(options,default=(0.0,-1))
+  minimum=0.72 if i>=0 and min(len(token),len(b[i]))==1 else 0.78
+  if i>=0 and score>=minimum:
+   used.add(i); matched+=score
+ similarity=matched/max(len(a),len(b))
+ threshold=0.82 if max(len(a),len(b))==1 else 0.66
+ return similarity if similarity>=threshold else 0.0
+
+def match_existing_player(players,name,team,player_id):
+ team_key=norm(team)
+ best=None; best_score=0.0
+ for identity,player in players.items():
+  existing_team=norm(player.get('team'))
+  if team_key and existing_team and team_key!=existing_team: continue
+  old_id=str(player.get('player_id') or '').strip()
+  new_id=str(player_id or '').strip()
+  if not team_key and not existing_team and old_id and new_id and old_id!=new_id: continue
+  score=player_name_similarity(name,player.get('player'))
+  if score>best_score:
+   best=identity; best_score=score
+ return best
+
+def player_name_quality(value):
+ tokens=player_name_tokens(value)
+ return (len(tokens),sum(len(token) for token in tokens))
+
+def has_position(value):
+ return str(value or '').strip().lower() not in {'','none','null','n/a','na','—','-','unknown'}
+
+def cfb_name_parts(value):
+ name=str(value or '').strip()
+ match=re.search(r'\s+\(([A-Z0-9]{2,6})\)$',name)
+ return (name[:match.start()].strip(),match.group(1)) if match else (name,None)
+
+def is_non_player(sport,name):
+ key=re.sub(r'[^a-z0-9]+',' ',norm(name)).strip()
+ if key in {'no touchdown scorer','no goal scorer','no home run','none','no player'}: return True
+ if sport=='cfb' and re.search(r'\b(defense|defence|d st|def st|dst)\b',key): return True
+ return False
+
+ESPN_LEAGUES={
+ 'nfl':('football','nfl'),'cfb':('football','college-football'),
+ 'nba':('basketball','nba'),'wnba':('basketball','wnba'),'ncaab':('basketball','mens-college-basketball'),
+ 'nhl':('hockey','nhl'),
+ 'mlb':('baseball','mlb'),'epl':('soccer','eng.1'),
+}
+
+def espn_roster_index(sport,events,cache_root):
+ """Resolve PropLine player IDs/names to event teams and positions."""
+ if sport not in ESPN_LEAGUES: return {'by_id':{},'by_name':{},'event_teams':{},'by_abbr':{}}
+ category,league=ESPN_LEAGUES[sport]
+ base=f'https://site.api.espn.com/apis/site/v2/sports/{category}/{league}'
+ cache_dir=Path(cache_root)/'team-rosters'/sport
+ cache_dir.mkdir(parents=True,exist_ok=True)
+ directory_path=cache_dir/'directory.json'
+ try:
+  cached=json.loads(directory_path.read_text(encoding='utf-8'))
+  cached_at=datetime.fromisoformat(str(cached.get('fetched_at','')).replace('Z','+00:00'))
+  directory=cached.get('teams') if (datetime.now(timezone.utc)-cached_at).total_seconds()<7*86400 else None
+ except (OSError,ValueError,TypeError,json.JSONDecodeError): directory=None
+ if not isinstance(directory,list):
+  try:
+   req=urllib.request.Request(base+'/teams?limit=500',headers={'Accept':'application/json','User-Agent':'RTMPro-Player-List-Cache'})
+   with urllib.request.urlopen(req,timeout=30) as res: body=json.load(res)
+   teams=[]
+   def walk(value):
+    if isinstance(value,dict):
+     team=value.get('team') if isinstance(value.get('team'),dict) else value
+     if team.get('id') and (team.get('abbreviation') or team.get('displayName')): teams.append(team)
+     for child in value.values(): walk(child)
+    elif isinstance(value,list):
+     for child in value: walk(child)
+   walk(body)
+   directory=list({str(team.get('id')):team for team in teams}.values())
+   if directory: write_json(directory_path,{'fetched_at':datetime.now(timezone.utc).isoformat(),'teams':directory})
+  except Exception as exc:
+   print(f'{sport}: ESPN team directory unavailable; using PropLine team metadata: {exc}',flush=True)
+   directory=[]
+ unique={str(team.get('id')):team for team in directory if isinstance(team,dict) and team.get('id')}
+ aliases={}
+ for team in unique.values():
+  for value in (team.get('displayName'),team.get('shortDisplayName'),team.get('shortName'),team.get('name'),
+                team.get('location'),team.get('nickname'),team.get('school'),team.get('abbreviation'),team.get('slug')):
+   if value: aliases[team_match_key(value)]=team
+ event_teams={}; team_ids=set()
+ for event in events:
+  eid=str(event.get('id') or ''); matched=[]
+  for side in ('home_team','away_team'):
+   raw=team_match_key(event.get(side)); candidate=aliases.get(raw)
+   if candidate is None and raw:
+    matches=[team for alias,team in aliases.items() if len(alias)>3 and (alias in raw or raw in alias)]
+    if len({str(team.get('id')) for team in matches})==1: candidate=matches[0]
+   if candidate: matched.append(candidate); team_ids.add(str(candidate['id']))
+  event_teams[eid]=matched
+ def roster(team_id):
+  path=cache_dir/f'{team_id}.json'
+  try:
+   data=json.loads(path.read_text(encoding='utf-8'))
+   fetched=datetime.fromisoformat(str(data.get('fetched_at','')).replace('Z','+00:00'))
+   if (datetime.now(timezone.utc)-fetched).total_seconds()<7*86400 and isinstance(data.get('athletes'),list): return team_id,data['athletes']
+  except (OSError,ValueError,TypeError,json.JSONDecodeError): pass
+  url=f'{base}/teams/{team_id}/roster'
+  req=urllib.request.Request(url,headers={'Accept':'application/json','User-Agent':'RTMPro-Player-List-Cache'})
+  with urllib.request.urlopen(req,timeout=25) as res: payload=json.load(res)
+  rows=[]
+  def collect(value):
+   if isinstance(value,dict):
+    if value.get('id') and (value.get('displayName') or value.get('fullName') or value.get('name')): rows.append(value)
+    for child in value.values(): collect(child)
+   elif isinstance(value,list):
+    for child in value: collect(child)
+  collect(payload.get('athletes') or [])
+  write_json(path,{'fetched_at':datetime.now(timezone.utc).isoformat(),'athletes':rows})
+  return team_id,rows
+ by_id={}; by_name=defaultdict(list); by_tokens=defaultdict(list)
+ if team_ids:
+  with ThreadPoolExecutor(max_workers=10) as pool:
+   futures=[pool.submit(roster,team_id) for team_id in sorted(team_ids)]
+   for future in as_completed(futures):
+    try: team_id,athletes=future.result()
+    except Exception as exc:
+     print(f'{sport}: ESPN roster fetch skipped: {exc}',flush=True); continue
+    team=unique.get(team_id,{})
+    team_data={'id':team_id,'team':team.get('abbreviation') or team.get('shortDisplayName') or team.get('displayName'),'team_name':team.get('displayName') or team.get('name')}
+    for athlete in athletes:
+     pid=str(athlete.get('id') or '').strip(); name=athlete.get('displayName') or athlete.get('fullName') or athlete.get('name')
+     pos=athlete.get('position')
+     info={**team_data,'name':str(name or '').strip(),'position':pos.get('abbreviation') if isinstance(pos,dict) else pos}
+     if pid: by_id[pid]=info
+     if name:
+      by_name[norm(name)].append(info)
+      by_tokens[' '.join(player_name_tokens(name))].append(info)
+ if sport=='cfb':
+  # ESPN's live team-roster endpoint misses some athletes even when their
+  # published CFB roster and position are available from SportsDataverse.
+  # Load only the event season(s); this is a small public CSV and needs no API
+  # key or parquet dependency.
+  cfb_seasons=set()
+  for event in events:
+   try:
+    event_date=datetime.fromisoformat(str(event.get('commence_time') or '').replace('Z','+00:00'))
+    cfb_seasons.add(event_date.year-1 if event_date.month<=3 else event_date.year)
+   except (ValueError,TypeError): pass
+  if not cfb_seasons: cfb_seasons.add(datetime.now(timezone.utc).year)
+  for cfb_season in sorted(cfb_seasons):
+   roster_url=f'https://raw.githubusercontent.com/sportsdataverse/cfbfastR-data/main/rosters/csv/cfb_rosters_{cfb_season}.csv'
+   try:
+    req=urllib.request.Request(roster_url,headers={
+     'Accept':'text/csv','User-Agent':'RTMPro-Player-List-Cache/1.0',
+    })
+    with urllib.request.urlopen(req,timeout=35) as res: roster_csv=res.read().decode('utf-8-sig')
+    added=0
+    for row in csv.DictReader(io.StringIO(roster_csv)):
+     name=' '.join((row.get('first_name') or '',row.get('last_name') or '')).strip()
+     position=str(row.get('position') or '').strip()
+     if not name or not has_position(position): continue
+     school=str(row.get('team') or '').strip()
+     school_key=team_match_key(school)
+     team=aliases.get(school_key)
+     if team is None and school_key:
+      matching=[value for alias,value in aliases.items() if len(alias)>=5 and (alias in school_key or school_key in alias)]
+      if len({str(value.get('id')) for value in matching})==1: team=matching[0]
+     player_id=str(row.get('athlete_id') or '').strip()
+     info={
+      'id':str(team.get('id') or '') if team else '',
+      'player_id':player_id,
+      'name':name,
+      'position':position,
+      'team':team.get('abbreviation') or team.get('shortDisplayName') or school if team else school,
+      'team_name':team.get('displayName') or school if team else school,
+      'headshot':str(row.get('headshot_url') or '').strip(),
+      'position_source':'sportsdataverse-roster',
+     }
+     existing=by_id.get(player_id) if player_id else None
+     # Keep ESPN's roster entry when it already has a valid position, but
+     # index the SportsDataverse row for names/teams ESPN omitted.
+     if player_id and (not existing or not has_position(existing.get('position'))): by_id[player_id]=info
+     name_rows=by_name[norm(name)]
+     if not any(str(value.get('id') or '')==str(info.get('id') or '') and roster_name_match(name,value.get('name') or '') for value in name_rows):
+      name_rows.append(info)
+      token_key=' '.join(cfb_roster_name_tokens(name))
+      by_tokens[token_key].append(info)
+      added+=1
+    print(f'cfb: SportsDataverse roster season {cfb_season} indexed {added} additional athlete identities',flush=True)
+   except Exception as exc:
+    print(f'cfb: SportsDataverse roster season {cfb_season} unavailable; using ESPN roster fallbacks: {exc}',flush=True)
+
+  # ESPN's team-roster endpoint omits some athletes who are still present in
+  # PropLine's event markets. Resolve those by their ESPN athlete ID, then
+  # cache only the small identity fields needed by the publisher.
+  athlete_cache_path=cache_dir/'athlete-profiles.json'
+  try:
+   cache_payload=json.loads(athlete_cache_path.read_text(encoding='utf-8'))
+   cached_profiles=cache_payload.get('athletes') if isinstance(cache_payload,dict) else {}
+   if not isinstance(cached_profiles,dict): cached_profiles={}
+  except (OSError,ValueError,TypeError,json.JSONDecodeError):
+   cached_profiles={}
+  wanted_ids=set()
+  supported_markets=set(SPORTS['cfb'][1].split())
+  for event in events:
+   if not isinstance(event,dict): continue
+   for book in event.get('bookmakers') or []:
+    if not isinstance(book,dict): continue
+    for market in book.get('markets') or []:
+     if not isinstance(market,dict) or market.get('key') not in supported_markets: continue
+     for outcome in market.get('outcomes') or []:
+      if not isinstance(outcome,dict) or not player_name_from_outcome(outcome): continue
+      raw_id=str(outcome.get('player_id') or outcome.get('athlete_id') or '').strip()
+      player_id=raw_id.split(':',1)[1] if raw_id.lower().startswith('espn:') else raw_id
+      existing=by_id.get(player_id)
+      clean_name,_=cfb_name_parts(player_name_from_outcome(outcome))
+      existing_matches=bool(existing and existing.get('name') and player_name_similarity(clean_name,existing.get('name')))
+      if player_id.isdigit() and not (existing_matches and has_position(existing.get('position'))):
+       wanted_ids.add(player_id)
+
+  profiles={}
+  now=datetime.now(timezone.utc)
+  stale_ids=[]
+  for player_id in wanted_ids:
+   saved=cached_profiles.get(player_id)
+   if isinstance(saved,dict):
+    try:
+     fetched=datetime.fromisoformat(str(saved.get('fetched_at','')).replace('Z','+00:00'))
+     if (now-fetched).total_seconds()<30*86400:
+      profiles[player_id]=saved
+      continue
+    except (ValueError,TypeError): pass
+   stale_ids.append(player_id)
+
+  def fetch_athlete_profile(player_id):
+   url=f'https://site.api.espn.com/apis/common/v3/sports/football/college-football/athletes/{player_id}'
+   req=urllib.request.Request(url,headers={
+    'Accept':'application/json','Accept-Encoding':'gzip',
+    'User-Agent':'RTMPro-Player-List-Cache/1.0',
+   })
+   try:
+    with urllib.request.urlopen(req,timeout=18) as res:
+     body=res.read()
+     if res.headers.get('Content-Encoding')=='gzip': body=gzip.decompress(body)
+    payload=json.loads(body)
+    athlete=payload.get('athlete') if isinstance(payload,dict) else None
+    if not isinstance(athlete,dict): return player_id,None
+    position=athlete.get('position')
+    team=athlete.get('team') if isinstance(athlete.get('team'),dict) else {}
+    info={
+     'id':str(team.get('id') or ''),
+     'player_id':str(athlete.get('id') or player_id),
+     'name':str(athlete.get('displayName') or athlete.get('fullName') or athlete.get('name') or '').strip(),
+     'position':position.get('abbreviation') if isinstance(position,dict) else position,
+     'team':team.get('abbreviation') or team.get('shortDisplayName') or team.get('displayName'),
+     'team_name':team.get('displayName') or team.get('name') or team.get('location'),
+     'fetched_at':now.isoformat(),
+    }
+    return player_id,info
+   except Exception:
+    return player_id,None
+
+  if stale_ids:
+   fetched_count=0
+   with ThreadPoolExecutor(max_workers=12) as pool:
+    futures=[pool.submit(fetch_athlete_profile,player_id) for player_id in stale_ids]
+    for future in as_completed(futures):
+     player_id,info=future.result()
+     if info:
+      profiles[player_id]=info
+      fetched_count+=1
+   print(f'cfb: ESPN athlete profile fallback resolved {fetched_count}/{len(stale_ids)} missing roster IDs',flush=True)
+
+  if profiles:
+   cached_profiles.update(profiles)
+   write_json(athlete_cache_path,{'updated_at':now.isoformat(),'athletes':cached_profiles})
+  for player_id,profile in profiles.items():
+   existing=by_id.get(player_id)
+   if existing and has_position(existing.get('position')) and existing.get('name') and profile.get('name') and player_name_similarity(existing.get('name'),profile.get('name')): continue
+   by_id[player_id]=profile
+   if profile.get('name'):
+    rows=by_name[norm(profile['name'])]
+    if not any(
+     str(row.get('player_id') or '')==str(profile.get('player_id') or '')
+     or (norm(row.get('name'))==norm(profile.get('name')) and str(row.get('id') or '')==str(profile.get('id') or ''))
+     for row in rows
+    ):
+     rows.append(profile)
+     by_tokens[' '.join(player_name_tokens(profile['name']))].append(profile)
+
+ # The CFB depth/status feed carries authoritative positions for some athletes
+ # missing from ESPN's roster API. Keep these rows as a final, team-aware source.
+ depth_positions_by_name=defaultdict(list)
+ if sport=='cfb':
+  depth_path=Path(__file__).resolve().parents[1]/'data'/'cfbdepth'/'injuries.json'
+  try:
+   depth_payload=json.loads(depth_path.read_text(encoding='utf-8'))
+   for team_row in depth_payload.get('teams') or []:
+    if not isinstance(team_row,dict): continue
+    aliases={norm(team_row.get(key)) for key in ('abbreviation','team_name','team_slug') if team_row.get(key)}
+    for group in ('active','cleared_history'):
+     for athlete in team_row.get(group) or []:
+      if not isinstance(athlete,dict): continue
+      athlete_name=str(athlete.get('player') or '').strip()
+      position=str(athlete.get('position') or '').strip()
+      if athlete_name and position:
+       row={'name':athlete_name,'position':position,'team_aliases':aliases}
+       depth_positions_by_name[norm(athlete_name)].append(row)
+       depth_positions_by_name[' '.join(player_name_tokens(athlete_name))].append(row)
+  except (OSError,ValueError,TypeError,json.JSONDecodeError) as exc:
+   print(f'cfb: depth-chart position fallback unavailable: {exc}',flush=True)
+ by_abbr={norm(team.get('abbreviation')):{'id':str(team.get('id')),'team':team.get('abbreviation'),'team_name':team.get('displayName') or team.get('name')} for team in unique.values() if team.get('abbreviation')}
+ return {'by_id':by_id,'by_name':dict(by_name),'event_teams':event_teams,'by_abbr':by_abbr,
+  'by_tokens':dict(by_tokens),'depth_positions_by_name':dict(depth_positions_by_name)}
+
+def cfb_depth_position_for(name,team_info,roster_index):
+ depth_index=roster_index.get('depth_positions_by_name',{})
+ rows=depth_index.get(norm(name),[]) or depth_index.get(' '.join(player_name_tokens(name)),[])
+ if not rows: return None
+ team_aliases={norm(team_info.get(key)) for key in ('team','team_name') if team_info.get(key)}
+ if team_info.get('id'):
+  espn_team=next((row for row in roster_index.get('by_abbr',{}).values() if str(row.get('id') or '')==str(team_info.get('id'))),None)
+  if espn_team:
+   for key in ('team','team_name'):
+    if espn_team.get(key): team_aliases.add(norm(espn_team[key]))
+ # PropLine abbreviations can differ from the depth feed's short code. Resolve
+ # those through ESPN's team directory before matching a same-name athlete.
+ for alias in list(team_aliases):
+  espn_team=roster_index.get('by_abbr',{}).get(alias)
+  if espn_team:
+   team_aliases.update(norm(espn_team.get(key)) for key in ('team','team_name') if espn_team.get(key))
+ def same_team_alias(left,right):
+  if left==right: return True
+  return min(len(left),len(right))>=6 and (left.startswith(right) or right.startswith(left))
+ matched=[row for row in rows if any(same_team_alias(alias,known) for alias in row['team_aliases'] for known in team_aliases)]
+ candidates=matched or rows
+ positions={row['position'].upper() for row in candidates if row.get('position')}
+ return next(iter(positions)) if len(positions)==1 else None
+
+def roster_team_for(sport,outcome,name,event,roster_index):
+ direct=outcome.get('team') or outcome.get('team_abbr') or outcome.get('team_abbreviation')
+ raw_id=str(outcome.get('player_id') or outcome.get('athlete_id') or '').strip()
+ pid=raw_id.split(':',1)[1] if raw_id.lower().startswith('espn:') else raw_id
+ candidate=roster_index.get('by_id',{}).get(pid)
+ clean,suffix=cfb_name_parts(name) if sport=='cfb' else (name,None)
+ if sport=='cfb' and candidate and candidate.get('name') and not player_name_similarity(clean,candidate.get('name')):
+  # Some provider rows carry stale/recycled IDs. Never attach another
+  # athlete's position just because the ID happens to resolve.
+  candidate=None
+ allowed={str(team.get('id')) for team in roster_index.get('event_teams',{}).get(str(event.get('id') or ''),[])}
+ direct_team=roster_index.get('by_abbr',{}).get(norm(direct),{}) if direct else {}
+ # PropLine occasionally attaches a stale team code. It must not prevent us
+ # from finding the player on one of the two actual event rosters.
+ if direct_team.get('id') and allowed and str(direct_team.get('id')) not in allowed:
+  direct=None
+  direct_team={}
+ if direct and not direct_team:
+  direct_key=team_match_key(direct)
+  participants=roster_index.get('event_teams',{}).get(str(event.get('id') or ''),[])
+  matching_teams=[]
+  for team in participants:
+   aliases={team_match_key(team.get(key)) for key in ('abbreviation','displayName','shortDisplayName','shortName','name','location','nickname','school','slug') if team.get(key)}
+   if direct_key in aliases or any(
+    min(len(direct_key),len(alias))>=5 and (direct_key.startswith(alias) or alias.startswith(direct_key))
+    for alias in aliases
+   ):
+    matching_teams.append(team)
+  matching_teams=list({str(team.get('id')):team for team in matching_teams}.values())
+  if len(matching_teams)==1:
+   team=matching_teams[0]
+   direct_team={'id':str(team.get('id')),'team':team.get('abbreviation'),'team_name':team.get('displayName') or team.get('name')}
+ # ESPN IDs carry the canonical athlete identity. Use that name/team/position
+ # when the ID belongs to this event and any provider team code agrees.
+ if candidate and (not allowed or str(candidate.get('id')) in allowed):
+  direct_team_id=str(direct_team.get('id') or '')
+  candidate_team_id=str(candidate.get('id') or '')
+  if not direct or not direct_team_id or direct_team_id==candidate_team_id:
+   return {**candidate,'position':candidate.get('position') or outcome.get('position'),
+     'position_source':candidate.get('position_source') or ('espn' if has_position(candidate.get('position')) else 'propline')}
+ if direct:
+  known=direct_team or {}
+  candidates=roster_candidates_for_name(roster_index,clean,sport,allowed,direct_team.get('id'))
+  if len(candidates)==1:
+   match=candidates[0]
+   return {**match,**known,'name':name,'team':direct,'position':match.get('position') or outcome.get('position'),
+    'position_source':match.get('position_source') or ('espn' if has_position(match.get('position')) else 'propline')}
+  return {**known,'team':direct,'position':outcome.get('position'),'position_source':'propline'}
+ if suffix and sport=='cfb':
+  return {**roster_index.get('by_abbr',{}).get(norm(suffix),{}),'team':roster_index.get('by_abbr',{}).get(norm(suffix),{}).get('team') or suffix,'position':outcome.get('position'),'position_source':'propline'}
+ if sport not in ESPN_LEAGUES or not roster_index: return {'team':None,'position':outcome.get('position'),'position_source':'propline'}
+ if candidate and (not allowed or str(candidate.get('id')) in allowed):
+  return {**candidate,'position':candidate.get('position') or outcome.get('position'),
+   'position_source':candidate.get('position_source') or ('espn' if has_position(candidate.get('position')) else 'propline')}
+ candidates=roster_candidates_for_name(roster_index,clean,sport,allowed)
+ if len(candidates)==1:
+  return {**candidates[0],'name':name,'position_source':candidates[0].get('position_source') or ('espn' if has_position(candidates[0].get('position')) else 'propline')}
+ return {'team':None,'position':outcome.get('position'),'position_source':'propline'}
+
+def opening_index(payload):
+ idx={}
+ if not isinstance(payload,dict): return idx
+ for book in payload.get('bookmakers') or []:
+  if not isinstance(book,dict): continue
+  bk=norm(book.get('key') or book.get('title'))
+  for market in book.get('markets') or []:
+   if not isinstance(market,dict): continue
+   mk=str(market.get('key') or '')
+   period=str(market.get('period') or '')
+   team=norm(market.get('team'))
+   for o in market.get('outcomes') or []:
+    if not isinstance(o,dict): continue
+    oid=o.get('outcome_id')
+    data={
+      'opening_line':o.get('opening_point'),
+      'opening_price':o.get('opening_price'),
+      'opening_at':o.get('opening_at'),
+      'opening_age_seconds':o.get('opening_age_seconds'),
+      'closing_line':o.get('point'),
+      'closing_price':o.get('price'),
+      'closing_at':o.get('closing_at'),
+      'closing_is_final':o.get('closing_is_final',payload.get('closing_is_final')),
+    }
+    if oid is not None: idx[('id',str(oid))]=data
+    # Do NOT key on point: the whole purpose is to retain the match when a
+    # line moves from (for example) 62.5 to 64.5.
+    desc=norm(o.get('description'))
+    side=norm(o.get('name'))
+    dfs=norm(o.get('dfs_odds_type'))
+    idx[('fallback',bk,mk,desc,side,period,team,dfs)]=data
+ return idx
+
+def find_opening(idx,book,market,outcome):
+ oid=outcome.get('outcome_id') if isinstance(outcome,dict) else None
+ if oid is not None and ('id',str(oid)) in idx: return idx[('id',str(oid))]
+ bk=norm(book.get('key') or book.get('title'))
+ key=('fallback',bk,str(market.get('key') or ''),norm(outcome.get('description')),
+      norm(outcome.get('name')),str(market.get('period') or ''),norm(market.get('team')),
+      norm(outcome.get('dfs_odds_type')))
+ return idx.get(key)
+
+def write_json(path,data):
+ path.parent.mkdir(parents=True,exist_ok=True)
+ path.write_text(json.dumps(data,ensure_ascii=False,separators=(',',':')),encoding='utf-8')
+
+def market_quote_rows(player):
+ output={}
+ for market,rows in (player.get('markets') or {}).items():
+  output[market]=[{
+   'selection':row.get('selection'),'line':row.get('line'),'price':row.get('price'),
+   'bookmaker':row.get('bookmaker'),'bookmakerTitle':row.get('bookmaker_title'),
+   'lastUpdate':row.get('market_last_update') or row.get('bookmaker_last_update'),
+   'opening_line':row.get('opening_line'),
+   'opening_price':row.get('opening_price'),
+   'opening_at':row.get('opening_at'),
+   'opening_age_seconds':row.get('opening_age_seconds'),
+   'closing_line':row.get('closing_line'),
+   'closing_price':row.get('closing_price'),
+   'closing_at':row.get('closing_at'),
+   'closing_is_final':row.get('closing_is_final'),
+   'history':row.get('history') or [],
+  } for row in rows if isinstance(row,dict)]
+ return output
+
+def board_quote_rows(quotes):
+ # Full per-prop history is stored in each player's detailed odds file. Keep
+ # the shared sport board compact; it is read for many players at once.
+ return [{key:value for key,value in row.items() if key!='history'} for row in (quotes or []) if isinstance(row,dict)]
+
+def american_best(rows):
+ candidates=[]
+ for row in rows:
+  try: price=float(row.get('price'))
+  except (TypeError,ValueError): continue
+  candidates.append((price,row))
+ return max(candidates,key=lambda item:item[0])[1] if candidates else None
+
+def prop_quote_fields(market_quotes):
+ quotes=[row for row in (market_quotes or []) if isinstance(row,dict)]
+ by_line=defaultdict(lambda:{'over':[],'under':[],'other':[]})
+ all_odds=[]
+ for row in quotes:
+  try: line=float(row.get('line'))
+  except (TypeError,ValueError): line=None
+  side=norm(row.get('selection'))
+  bucket='over' if side in {'over','o','yes'} else 'under' if side in {'under','u','no'} else 'other'
+  by_line[line][bucket].append(row)
+  all_odds.append({**row,'line':line})
+ line_rows=[]
+ for line,group in by_line.items():
+  over=american_best(group['over']); under=american_best(group['under'])
+  line_rows.append({'line':line,'overOdds':over.get('price') if over else None,
+   'underOdds':under.get('price') if under else None,
+   'bestOverBook':over.get('bookmakerTitle') or over.get('bookmaker') if over else None,
+   'bestUnderBook':under.get('bookmakerTitle') or under.get('bookmaker') if under else None,
+   'oddsCount':len(group['over'])+len(group['under'])})
+ # Select the line with the most book quotes; break ties by line value.
+ line_rows.sort(key=lambda row:(-row['oddsCount'],str(row.get('line') or '')))
+ selected=line_rows[0] if line_rows else None
+ selected_quotes = (by_line[selected.get('line')]['over'] + by_line[selected.get('line')]['under']) if selected else []
+ over=american_best([row for row in quotes if norm(row.get('selection')) in {'over','o','yes'}])
+ under=american_best([row for row in quotes if norm(row.get('selection')) in {'under','u','no'}])
+ return {
+  'line':selected.get('line') if selected else None,
+  'overOdds':over.get('price') if over else None,'underOdds':under.get('price') if under else None,
+  'bestOverOdds':over.get('price') if over else None,'bestUnderOdds':under.get('price') if under else None,
+  'bestOverBook':(over.get('bookmakerTitle') or over.get('bookmaker')) if over else None,
+  'bestUnderBook':(under.get('bookmakerTitle') or under.get('bookmaker')) if under else None,
+  'lineOptions':line_rows,'selectedLineOdds':selected_quotes,
+  'allOdds':all_odds,
+ }
+
+def player_name_from_outcome(outcome):
+ # PropLine's standard O/U shape has the player in description. Keep the
+ # alternate fields as a forward-compatible fallback if the upstream shape
+ # changes, and support player-name YES/N+ outcomes where name is the player.
+ for field in ('description','player_name','playerName','player'):
+  value=outcome.get(field)
+  if isinstance(value,str) and value.strip(): return value.strip()
+ name=outcome.get('name')
+ if isinstance(name,str) and name.strip() and norm(name) not in {'over','under','yes','no','o','u'}:
+  return name.strip()
+ return None
+
+def describe_empty_response(sport,events):
+ markets=Counter(); outcomes=0; sample=None
+ for ev in events:
+  if not isinstance(ev,dict): continue
+  for book in ev.get('bookmakers') or []:
+   if not isinstance(book,dict): continue
+   for market in book.get('markets') or []:
+    if not isinstance(market,dict): continue
+    markets[str(market.get('key') or '<missing>')]+=1
+    for outcome in market.get('outcomes') or []:
+     if not isinstance(outcome,dict): continue
+     outcomes+=1
+     if sample is None: sample={key:outcome.get(key) for key in ('name','description','player','player_name','point') if key in outcome}
+ print(f'{sport}: no described player outcomes; events={len(events)}, market_rows={sum(markets.values())}, outcomes={outcomes}, market_keys={dict(markets.most_common(20))}, sample_outcome={sample}',flush=True)
+
+def opponent_for(team_info,event,roster_index):
+ participants=roster_index.get('event_teams',{}).get(str(event.get('id') or ''),[])
+ own_id=str(team_info.get('id') or '')
+ own_abbr=norm(team_info.get('team'))
+ own_name=norm(team_info.get('team_name'))
+ own=next((team for team in participants if (own_id and str(team.get('id'))==own_id) or (own_abbr and norm(team.get('abbreviation'))==own_abbr) or (own_name and norm(team.get('displayName'))==own_name)),None)
+ if own and len(participants)==2:
+  other=next((team for team in participants if str(team.get('id'))!=str(own.get('id'))),None)
+  if other: return other.get('abbreviation') or other.get('shortDisplayName') or other.get('displayName')
+ return None
+
+def is_home_for(team_info,event,roster_index):
+ participants=roster_index.get('event_teams',{}).get(str(event.get('id') or ''),[])
+ own_id=str(team_info.get('id') or '')
+ own_abbr=norm(team_info.get('team'))
+ if own_id:
+  for side,team in zip(('home','away'),participants):
+   if str(team.get('id'))==own_id: return side=='home'
+ if own_abbr:
+  for side,team in zip(('home','away'),participants):
+   if norm(team.get('abbreviation'))==own_abbr: return side=='home'
+ return None
+
+def build_sport(sport,events,root,stamp,key,roster_index=None):
+ roster_index=roster_index or {'by_id':{},'by_name':{},'event_teams':{},'by_abbr':{}}
+ index=[]; count=0; board_props=[]
+ for ev in events:
+  if not isinstance(ev,dict) or ev.get('id') is None: continue
+  eid=str(ev['id']); players={}
+  open_idx={}
+  if sport in OPENING_SPORTS:
+   try:
+    open_idx=opening_index(fetch_closing(sport,eid,key))
+   except Exception as exc:
+    print(f'{sport} event {eid}: opening-line enrichment skipped: {exc}',flush=True)
+  for book in ev.get('bookmakers') or []:
+   if not isinstance(book,dict): continue
+   for market in book.get('markets') or []:
+    if not isinstance(market,dict) or market.get('key') not in SPORTS[sport][1].split(): continue
+    for outcome in market.get('outcomes') or []:
+     if not isinstance(outcome,dict): continue
+     raw_name=player_name_from_outcome(outcome)
+     name,team_suffix=cfb_name_parts(raw_name) if sport=='cfb' and raw_name else (raw_name,None)
+     if not isinstance(name,str) or not name.strip(): continue
+     if is_non_player(sport,raw_name): continue
+     player_id=outcome.get('player_id') or outcome.get('athlete_id')
+     team_info=roster_team_for(sport,outcome,raw_name,ev,roster_index)
+     if sport=='cfb':
+      depth_position=cfb_depth_position_for(name,team_info,roster_index)
+      if depth_position and (team_info.get('position_source')!='espn' or not has_position(team_info.get('position'))):
+       team_info['position']=depth_position
+      # Passing yards and passing touchdowns are QB-only PropLine markets.
+      # This gives players without ESPN IDs/roster matches a reliable position
+      # from the market itself instead of leaving the published row blank.
+      if sport=='cfb' and not has_position(team_info.get('position')) and market.get('key') in {'player_pass_yds','player_pass_tds'}:
+       team_info['position']='QB'
+       team_info['position_source']='market'
+     name=team_info.get('name') or name
+     player_team=team_info.get('team') or team_suffix
+     # Name + team is the stable identity in quote feeds; upstream IDs can be
+     # absent or vary between books. Fuzzy joining here keeps every book and
+     # market for an athlete together in one published file.
+     identity='name:'+' '.join(player_name_tokens(name))+'|team:'+norm(player_team)
+     if identity not in players:
+      identity=match_existing_player(players,name,player_team,player_id) or identity
+     p=players.get(identity)
+     if p is None:
+      p={'player':name,'sport':sport,'event_id':eid,
+       'home_team':ev.get('home_team'),'away_team':ev.get('away_team'),
+       'commence_time':ev.get('commence_time'),'fetched_at':stamp,'markets':{},
+       'player_id':player_id,'team':team_info.get('team'),'team_id':team_info.get('id'),'position':team_info.get('position')}
+      players[identity]=p
+     elif player_name_quality(name)>player_name_quality(p.get('player')):
+      p['player']=name
+     if p.get('player_id') in (None,'') and player_id: p['player_id']=player_id
+     if p.get('team') in (None,'') and team_info.get('team'): p['team']=team_info.get('team')
+     if p.get('team_id') in (None,'') and team_info.get('id'): p['team_id']=team_info.get('id')
+     if p.get('position') in (None,'') and team_info.get('position'): p['position']=team_info.get('position')
+     row={
+       'bookmaker':book.get('key') or book.get('title'),
+       'bookmaker_title':book.get('title'),
+       'bookmaker_last_update':book.get('last_update'),
+       'market_last_update':market.get('last_update'),
+       'selection':outcome.get('name'),'line':outcome.get('point'),
+       'price':outcome.get('price'),'outcome':outcome}
+     opening=find_opening(open_idx,book,market,outcome) if open_idx else None
+     if opening:
+      # Keep live line/price authoritative. Opening/closing fields are metadata.
+      row.update(opening)
+     p['markets'].setdefault(market['key'],[]).append(row)
+  for identity,player in players.items():
+   name=player['player']
+   identity_hash=hashlib.sha256(identity.encode('utf-8')).hexdigest()[:12]
+   rel=f'Player Odds/{sport}/events/{slug(eid)}/players/{slug(name)}-{identity_hash}.json'
+   write_json(root/rel,player)
+   opponent=opponent_for({'id':player.get('team_id'),'team':player.get('team'),'team_name':None},ev,roster_index) if player.get('team') else None
+   home_flag=is_home_for({'id':player.get('team_id'),'team':player.get('team')},ev,roster_index) if player.get('team') else None
+   index.append({'player':name,'player_id':player.get('player_id'),'event_id':eid,'path':rel,'commence_time':ev.get('commence_time'),
+     'home_team':ev.get('home_team'),'away_team':ev.get('away_team'),
+     'team':player.get('team'),'opponent':opponent,'position':player.get('position'),'is_home':home_flag,'markets':list(player['markets'])})
+   for provider_market,quotes in market_quote_rows(player).items():
+    compact=prop_quote_fields(board_quote_rows(quotes))
+    # Every quoted price remains in Player Odds. Omit the duplicated copy of
+    # the selected line's quotes; the UI can derive it from allOdds.
+    compact.pop('selectedLineOdds',None)
+    board_props.append({
+     'player':name,'playerId':player.get('player_id'),'team':player.get('team'),
+     'opponent':opponent,'gameId':eid,'homeTeam':ev.get('home_team'),
+     'awayTeam':ev.get('away_team'),'commenceTime':ev.get('commence_time'),
+     'position':player.get('position'),'isHome':home_flag,
+     'market':PLAYER_MARKETS.get(sport,{}).get(provider_market,provider_market),
+     'rawMarket':provider_market,'source':'PropLine','projection':None,**compact,
+    })
+   count+=1
+ empty_response=not count
+ if empty_response:
+  # A sport can legitimately have no current events or no player markets
+  # (for example, MLB after the season). Publish an explicit empty snapshot
+  # for that sport instead of failing the entire multi-sport generation.
+  # Other sports will continue through the same build and publish path.
+  describe_empty_response(sport,events)
+ event_index=[]
+ for ev in events:
+  if not isinstance(ev,dict) or ev.get('id') is None: continue
+  event_index.append({
+   'id':str(ev['id']),'event_id':str(ev['id']),
+   'name':ev.get('name') or ev.get('title'),
+   'home_team':ev.get('home_team'),'away_team':ev.get('away_team'),
+   'commence_time':ev.get('commence_time'),
+  })
+ write_json(root/'Player Odds'/sport/'index.json',{
+  'sport':sport,'fetched_at':stamp,'events':event_index,'players':index,
+  **({'warning':'PropLine returned no player outcomes for this run.'} if empty_response else {}),
+ })
+ board_path=root/'Player Odds'/sport/'board.json'
+ write_json(board_path,{'sport':sport,'updated_at':stamp,'player_count':len(index),'props':board_props})
+ board_mb=board_path.stat().st_size/(1024*1024)
+ print(f'{sport}: Player Odds board / {len(board_props)} player-market rows / {board_mb:.1f} MiB',flush=True)
+ if board_path.stat().st_size >= 95*1024*1024:
+  raise ValueError(f'Player Odds/{sport}/board.json is {board_mb:.1f} MiB; must remain below 95 MiB to preserve GitHub\'s per-file size limit')
+ quotes=[quote for prop in board_props for quote in (prop.get('allOdds') or [])]
+ books=sorted({str(quote.get('bookmakerTitle') or quote.get('bookmaker') or '').strip() for quote in quotes if quote.get('bookmakerTitle') or quote.get('bookmaker')})
+ opening_quotes=sum(quote.get('opening_line') is not None or quote.get('opening_price') is not None for quote in quotes)
+ print(f"{sport}: odds integrity: {len(quotes)} quote rows across {len(books)} books ({', '.join(books)}); {opening_quotes} quotes have opening history",flush=True)
+ return {'players':count,'events':len(events),'quote_rows':len(quotes),'sportsbook_count':len(books),
+  'opening_quote_rows':opening_quotes,**({'empty_response':True} if empty_response else {})}
+
+def build_player_list(sport,screen,index,stamp,source_events=None):
+ # This compact index is derived from the same PropLine response that produced
+ # the detailed player-odds files. A player appears only when PropLine returned
+ # at least one player market for them.
+ by_key={}
+ games={}
+ for event in source_events or []:
+  if not isinstance(event,dict): continue
+  event_id=str(event.get('id') or event.get('event_id') or '')
+  if not event_id: continue
+  games[event_id]={
+   'id':event_id,'eventId':event_id,'gameId':event_id,
+   'name':event.get('name') or event.get('title'),
+   'homeTeam':event.get('home_team') or event.get('homeTeam'),
+   'awayTeam':event.get('away_team') or event.get('awayTeam'),
+   'commenceTime':event.get('commence_time') or event.get('commenceTime'),
+   'players':[],
+  }
+ for entry in index:
+  name=str(entry.get('player') or '').strip()
+  if not name: continue
+  if is_non_player(sport,name): continue
+  # CFB responses sometimes append a school abbreviation to the player name
+  # (for example "AJ Little (USM)") even when another outcome for that same
+  # athlete uses the plain name. Prefer the clean display name and retain the
+  # school code as a team fallback. The same ID-first identity rule also
+  # protects other sports if an upstream name varies between markets.
+  qualifier=re.search(r'\s+\(([A-Z0-9]{2,6})\)$',name) if sport=='cfb' else None
+  clean_name=name[:qualifier.start()].strip() if qualifier else name
+  team=entry.get('team') or (qualifier.group(1) if qualifier else None)
+  player_id=entry.get('player_id')
+  identity=player_identity(player_id,clean_name,team)
+  key=identity
+  player=by_key.get(key)
+  if player is None:
+   player={
+    'playerId':player_id, 'name':clean_name, 'team':team,
+    'opponent':entry.get('opponent'), 'eventId':str(entry.get('event_id') or ''),
+    'position':entry.get('position'),'isHome':entry.get('is_home'),
+    'markets':[], 'props':[]}
+   by_key[key]=player
+  else:
+   # Keep the clearest name when PropLine supplied variants for one athlete.
+   current_qualified=bool(re.search(r'\s+\([A-Z0-9]{2,6}\)$',str(player.get('name') or '')))
+   if (current_qualified and not qualifier) or (len(clean_name)<len(str(player.get('name') or '')) and not qualifier):
+    player['name']=clean_name
+   if player.get('team') in (None,'') and team: player['team']=team
+   if player.get('opponent') in (None,'') and entry.get('opponent'): player['opponent']=entry.get('opponent')
+   if player.get('position') in (None,'') and entry.get('position'): player['position']=entry.get('position')
+  markets=[PLAYER_MARKETS.get(sport,{}).get(market,market) for market in (entry.get('markets') or [])]
+  player['markets']=sorted(set(player['markets'])|set(markets))
+  seen_props={(p.get('eventId'),p.get('market')) for p in player['props']}
+  for provider_market in entry.get('markets') or []:
+   market=PLAYER_MARKETS.get(sport,{}).get(provider_market,provider_market)
+   prop_key=(str(entry.get('event_id') or ''),market)
+   if prop_key in seen_props: continue
+   seen_props.add(prop_key)
+   player['props'].append({
+    'player':player['name'], 'playerId':player.get('playerId'), 'team':player.get('team'),
+    'opponent':entry.get('opponent'), 'gameId':str(entry.get('event_id') or ''),
+    'homeTeam':entry.get('home_team'),'awayTeam':entry.get('away_team'),
+    'commenceTime':entry.get('commence_time'),'position':entry.get('position'),'isHome':entry.get('is_home'),
+    'eventId':str(entry.get('event_id') or ''),'market':market,
+    'oddsFile':entry.get('path'),'hasOdds':True,'source':'PropLine',
+   })
+ # Normalize props again after merging name variants so every row uses the
+ # canonical player display name/team, including rows added before a rename.
+ for player in by_key.values():
+  for prop in player['props']:
+   prop['player']=player['name']
+   prop['playerId']=player.get('playerId')
+   if prop.get('team') in (None,''): prop['team']=player.get('team')
+   if prop.get('opponent') in (None,''): prop['opponent']=player.get('opponent')
+ for entry in index:
+  name=str(entry.get('player') or '').strip()
+  if not name: continue
+  clean_name,qualifier=cfb_name_parts(name) if sport=='cfb' else (name,None)
+  player_id=entry.get('player_id')
+  entry_team=entry.get('team') or (qualifier.group(1) if qualifier else None)
+  identity=player_identity(player_id,clean_name,entry_team)
+  player=by_key.get(identity)
+  if player is None: continue
+  event_id=str(entry.get('event_id') or '')
+  game=games.setdefault(event_id,{
+   'id':event_id,'eventId':event_id,'gameId':event_id,'name':None,
+   'homeTeam':entry.get('home_team'),'awayTeam':entry.get('away_team'),
+   'commenceTime':entry.get('commence_time'),'players':[]})
+  if not game.get('homeTeam'): game['homeTeam']=entry.get('home_team')
+  if not game.get('awayTeam'): game['awayTeam']=entry.get('away_team')
+  if not game.get('commenceTime'): game['commenceTime']=entry.get('commence_time')
+  game_player=next((p for p in game['players'] if player_identity(p.get('playerId'),p.get('name'),p.get('team'))==identity),None)
+  if game_player is None:
+   game_player={'playerId':player.get('playerId'),'name':player.get('name'),'team':entry.get('team') or player.get('team') or qualifier,
+    'opponent':entry.get('opponent') or player.get('opponent'),'position':entry.get('position'),
+    'isHome':entry.get('is_home'),'oddsFile':entry.get('path'),'markets':[]}
+   game['players'].append(game_player)
+  game_player['markets']=sorted(set(game_player['markets'])|set(PLAYER_MARKETS.get(sport,{}).get(m,m) for m in (entry.get('markets') or [])))
+ for game in games.values():
+  game['playerCount']=len(game['players'])
+  game['propCount']=sum(len(player['markets']) for player in game['players'])
+ games_list=sorted(games.values(),key=lambda game:(str(game.get('commenceTime') or ''),game.get('id') or ''))
+ return {
+  'ok':True, 'sport':sport, 'screen':screen, 'updated_at':stamp,
+  'status':'ready' if by_key else 'empty', 'source':'PropLine',
+  'player_count':len(by_key), 'prop_count':sum(len(p['props']) for p in by_key.values()),
+  'game_count':len(games_list),'games':games_list,'players':list(by_key.values()),
+ }
+
+def publish_player_lists(root,stamp):
+ for sport in SPORTS:
+  index_path=root/'Player Odds'/sport/'index.json'
+  try:
+   index_data=json.loads(index_path.read_text(encoding='utf-8'))
+  except (OSError,json.JSONDecodeError):
+   index_data={'players':[]}
+  entries=index_data.get('players') if isinstance(index_data,dict) else []
+  entries=entries if isinstance(entries,list) else []
+  screens=['prop-center']
+  if sport=='nfl': screens.append('projections')
+  for screen in screens:
+   source_events=index_data.get('events') if isinstance(index_data,dict) else []
+   payload=build_player_list(sport,screen,entries,stamp,source_events)
+   output_path=root/'Player Lists'/sport/f'{screen}.json'
+   write_json(output_path,payload)
+   team_count=sum(bool(player.get('team')) for player in payload['players'])
+   size_bytes=output_path.stat().st_size
+   size_mb=size_bytes/(1024*1024)
+   print(f"Published candidate Player Lists/{sport}/{screen}.json: {payload['game_count']} games / {payload['player_count']} unique PropLine players ({team_count} with team metadata) / {payload['prop_count']} player-market pointers / {size_mb:.1f} MiB",flush=True)
+   if size_bytes >= 95*1024*1024:
+    raise ValueError(f"Player Lists/{sport}/{screen}.json is {size_mb:.1f} MiB; must remain below 95 MiB to preserve GitHub's per-file size limit")
+
+def retain_previous_sport_cache(sport,out,root):
+ manifest_path=out/'manifest.json'
+ current=out/'Player Odds'/sport
+ try:
+  current_index=json.loads((current/'index.json').read_text(encoding='utf-8'))
+  players=current_index.get('players')
+  if isinstance(players,list) and players:
+   import shutil
+   shutil.copytree(current,root/'Player Odds'/sport,dirs_exist_ok=True)
+   return len(players)
+ except (OSError,ValueError,TypeError,json.JSONDecodeError):
+  pass
+ try:
+  manifest=json.loads(manifest_path.read_text(encoding='utf-8'))
+  base=Path(str(manifest.get('base_path') or ''))
+  if base.is_absolute() or '..' in base.parts: return None
+  old_root=out/base
+  previous=old_root/sport
+  previous_index=json.loads((previous/'index.json').read_text(encoding='utf-8'))
+  players=previous_index.get('players')
+  if not isinstance(players,list) or not players: return None
+  migrated=[]; board_props=[]
+  for entry in players:
+   if not isinstance(entry,dict) or not entry.get('player'): continue
+   old_path=Path(str(entry.get('path') or ''))
+   if old_path.is_absolute() or '..' in old_path.parts: continue
+   source=old_root/old_path
+   try: player_data=json.loads(source.read_text(encoding='utf-8'))
+   except (OSError,ValueError,json.JSONDecodeError): continue
+   identity=player_identity(entry.get('player_id'),entry.get('player'),entry.get('team'))
+   identity_hash=hashlib.sha256(identity.encode('utf-8')).hexdigest()[:12]
+   relative=f"Player Odds/{sport}/events/{slug(entry.get('event_id'))}/players/{slug(entry.get('player'))}-{identity_hash}.json"
+   write_json(root/relative,player_data)
+   migrated_entry={key:value for key,value in entry.items() if key not in {'market_quotes','marketQuotes'}}
+   migrated_entry['path']=relative
+   migrated.append(migrated_entry)
+   quotes_by_market=entry.get('market_quotes') or entry.get('marketQuotes') or market_quote_rows(player_data)
+   for provider_market,quotes in quotes_by_market.items():
+    compact=prop_quote_fields(board_quote_rows(quotes if isinstance(quotes,list) else []))
+    compact.pop('selectedLineOdds',None)
+    board_props.append({
+     'player':entry.get('player'),'playerId':entry.get('player_id'),'team':entry.get('team'),
+     'opponent':entry.get('opponent'),'gameId':str(entry.get('event_id') or ''),
+     'homeTeam':entry.get('home_team'),'awayTeam':entry.get('away_team'),
+     'commenceTime':entry.get('commence_time'),'position':entry.get('position'),
+     'isHome':entry.get('is_home'),'market':PLAYER_MARKETS.get(sport,{}).get(provider_market,provider_market),
+     'rawMarket':provider_market,'source':'PropLine','projection':None,**compact,
+    })
+  if not migrated: return None
+  write_json(root/'Player Odds'/sport/'index.json',{
+   'sport':sport,'fetched_at':previous_index.get('fetched_at'),'events':previous_index.get('events') or [],'players':migrated,
+  })
+  write_json(root/'Player Odds'/sport/'board.json',{
+   'sport':sport,'updated_at':previous_index.get('fetched_at'),'player_count':len(migrated),'props':board_props,
+  })
+  return len(migrated)
+ except (OSError,ValueError,TypeError,json.JSONDecodeError):
+  return None
+
+def main():
+ key=os.environ['PROPLINE_API_KEY'].strip(); out=Path(os.environ['PROPLINE_OUTPUT_DIR'])
+ stamp=datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ'); root=out/f'.propline-stage-{stamp}'
+ root.mkdir(parents=True,exist_ok=False)
+ stats={}
+ try:
+  for sport in SPORTS:
+   events=fetch(sport,key)
+   roster_index=espn_roster_index(sport,events,out)
+   stats[sport]=build_sport(sport,events,root,stamp,key,roster_index)
+   if sport=='cfb' and stats[sport].get('empty_response'):
+    retained=retain_previous_sport_cache(sport,out,root)
+    if retained is not None:
+     stats[sport]={'players':retained,'events':len(events),'reused_previous_cache':True,'fetched_players':0}
+     print(f'cfb: upstream returned no player outcomes; retained previous cache ({retained} players)',flush=True)
+    else:
+     write_json(root/'Player Odds'/sport/'index.json',{'sport':sport,'fetched_at':stamp,'events':[],'players':[],'warning':'Upstream returned no described player outcomes; see workflow diagnostics.'})
+     write_json(root/'Player Odds'/sport/'board.json',{'sport':sport,'updated_at':stamp,'player_count':0,'props':[]})
+     stats[sport]={'players':0,'events':len(events),'empty_response':True}
+     print('cfb: no prior player-prop cache exists; publishing an empty CFB index while other sports continue',flush=True)
+   print(f'{sport}: {stats[sport]}',flush=True)
+  publish_player_lists(root,stamp)
+ except Exception:
+  import shutil
+  shutil.rmtree(root,ignore_errors=True)
+  raise
+ import shutil
+ for directory in ('Player Odds','Player Lists'):
+  target=out/directory
+  if target.exists(): shutil.rmtree(target)
+  os.replace(root/directory,target)
+ manifest={'version':stamp,'updated_at':datetime.now(timezone.utc).isoformat(),
+   'sports':stats,'player_odds_path':'Player Odds','player_lists_path':'Player Lists'}
+ write_json(out/'manifest.json',manifest)
+ shutil.rmtree(root,ignore_errors=True)
+ # Remove the old generation layout after the new directories and manifest
+ # have been fully built. Other data-branch workflows do not use these paths.
+ for legacy in (out/'versions',out/'player-lists'):
+  if legacy.exists(): shutil.rmtree(legacy)
+ print('Published',stamp,flush=True)
+if __name__=='__main__':main()
