@@ -218,6 +218,28 @@ def main():
                     print(f"STALE {t['slug']}: retaining last published report after fetch error: {e}", flush=True)
                 else:
                     print(f"ERROR {t['slug']}: {e}; no prior report is available", flush=True)
+    # Give transiently failing team endpoints one additional pass, without
+    # discarding successful results or weakening league-wide validation.
+    if errors:
+        initial_errors = errors
+        errors = []
+        failed_by_slug = {item['team_slug']: item for item in initial_errors}
+        print(f"Retrying {len(failed_by_slug)} failed team reports after initial pass", flush=True)
+        time.sleep(5)
+        for slug in failed_by_slug:
+            team = next((item for item in selected if item['slug'] == slug), None)
+            if team is None:
+                continue
+            try:
+                result = collect(team)
+                teams_by_slug[slug.lower()] = result
+                refreshed_slugs.add(slug.lower())
+                stale_slugs.discard(slug.lower())
+                print(f"RETRY OK {slug}: {len(result['active'])} active", flush=True)
+            except Exception as error:
+                has_previous = slug.lower() in teams_by_slug
+                errors.append({'team_slug': slug, 'error': str(error), 'using_last_known_data': has_previous})
+                print(f"RETRY FAILED {slug}: {error}", flush=True)
     teams = sorted(teams_by_slug.values(), key=lambda team: str(team.get('team_slug') or ''))
     coverage_complete = registry_slugs.issubset(teams_by_slug.keys())
     result = dict(fetched_at=now(), complete=coverage_complete, registry_team_count=len(registry),
