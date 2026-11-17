@@ -37,11 +37,13 @@ jobs:
       - name: Collect consensus
         env:
           PIKKIT_AUTH_TOKEN: ${{ secrets.PIKKIT_AUTH_TOKEN }}
-        run: python3 action/pikkit-consensus/scripts/collect.py --out /tmp/pikkit-consensus-data
+        run: python3 action/scripts/collect.py --out /tmp/pikkit-consensus-data
       - name: Restore Pikkit-Consensus Git snapshot
         env:
           GH_TOKEN: ${{ github.token }}
         run: python action/scripts/snapshot_git.py restore --branch 'Pikkit-Consensus' --path 'data'
+      - name: Create data staging directory
+        run: mkdir -p data
       - name: Stage verified consensus indexes and event details
         working-directory: data
         run: |
