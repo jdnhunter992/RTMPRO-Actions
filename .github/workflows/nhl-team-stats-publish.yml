@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: nhl-game-detail-stats-publisher
@@ -28,29 +28,16 @@ jobs:
         with:
           deno-version: v2.x
 
-      - name: Restore published data from Cloudflare R2
+      - name: Restore nhl-team-stats-data Git snapshot
         env:
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
-          R2_BUCKET: ${{ vars.R2_BUCKET }}
-        run: |
-          set -euo pipefail
-          python -m pip install --disable-pip-version-check boto3
-          python action/scripts/r2_data.py download --prefix 'nhl-team-stats-data/nhl-team-stats' --dest 'data/nhl-team-stats'
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/snapshot_git.py restore --branch 'nhl-team-stats-data' --path 'nhl-team-stats'
       - name: Fetch NHL reports and play-by-play; build all filters and league ranks
         env:
           NHL_TEAM_STATS_OUTPUT_DIR: ${{ github.workspace }}/data
         run: deno run --no-check --allow-net --allow-read --allow-write --allow-env=NHL_TEAM_STATS_OUTPUT_DIR,NHL_TEAM_STATS_SEASON action/action/scripts/publish_nhl_team_stats.ts
 
-      - name: Publish NHL game-detail JSON to R2
-        working-directory: data
+      - name: Publish nhl-team-stats-data Git snapshot
         env:
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
-          R2_BUCKET: ${{ vars.R2_BUCKET }}
-        run: |
-          set -euo pipefail
-          python -m pip install --disable-pip-version-check boto3
-          python ../action/scripts/r2_data.py sync --root . --map 'nhl-team-stats'='nhl-team-stats-data/nhl-team-stats'
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/snapshot_git.py publish --branch 'nhl-team-stats-data' --path 'nhl-team-stats'
