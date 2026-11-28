@@ -1,0 +1,25 @@
+{
+  "sport": "cfb",
+  "schemaVersion": 1,
+  "cacheVersion": 1,
+  "opponentCacheVersion": 1,
+  "updatedAt": "2026-11-28T10:01:05.109Z",
+  "seasons": {
+    "2025": {
+      "season": 2025,
+      "positionGroups": [
+        "qb",
+        "rb",
+        "wr_te"
+      ]
+    },
+    "2026": {
+      "season": 2026,
+      "positionGroups": [
+        "qb",
+        "rb",
+        "wr_te"
+      ]
+    }
+  }
+}
